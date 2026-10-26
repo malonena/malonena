@@ -89,6 +89,9 @@ struct ContentView: View {
         .onChange(of: scenePhase) { ph in
             if ph == .active { model.onForeground() } else { model.saveAll() }
         }
+        .onChange(of: model.toastText) { t in
+            if let t { showToast(t); model.toastText = nil }
+        }
         .onChange(of: model.zoom) { z in
             if abs(sliderZoom - Double(z)) > 0.001 { sliderZoom = Double(z) }
         }

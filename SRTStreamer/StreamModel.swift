@@ -1,4 +1,5 @@
 import AVFoundation
+import CallKit
 import Combine
 import CoreMotion
 import HaishinKit
@@ -257,7 +258,7 @@ final class StreamModel: ObservableObject {
         do {
             try session.setCategory(.playAndRecord,
                                     mode: noiseReduction ? .videoRecording : .default,
-                                    options: [.defaultToSpeaker, .allowBluetooth])
+                                    options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
             try session.setActive(true)
         } catch {
             micInfo = "音频会话配置失败"
@@ -356,10 +357,18 @@ final class StreamModel: ObservableObject {
         let savedZoom = CGFloat((UserDefaults.standard.object(forKey: "zoom") as? Double) ?? 1)
         await attachCamera()
         setZoom(max(savedZoom, minZoom))
+        micPermission = audioOK
+        setupCallMonitoring()
         if audioOK {
-            do { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
-            catch { status = "麦克风连接失败: \(error.localizedDescription)" }
-            await applyMicMute()
+            if isInCall {
+                // 通话中：不挂麦克风，只推视频 + 静音音频
+                audioSuspended = true
+                toastText = "通话中，暂停声音采集"
+            } else {
+                do { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
+                catch { status = "麦克风连接失败: \(error.localizedDescription)" }
+                await applyMicMute()
+            }
         }
         await mixer.addOutput(previewView) // 预览始终直接来自 mixer
         await mixer.startRunning()
@@ -686,6 +695,119 @@ final class StreamModel: ObservableObject {
     }
 
     /// 回到前台：若推流中断则自动重启
+    // MARK: - 通话处理（通话占用麦克风时保持视频继续）
+
+    @Published var toastText: String?
+    @Published var audioSuspended = false
+    private var micPermission = false
+    private let callObserver = CXCallObserver()
+    private var callDelegate: CallDelegate?
+    private var callMonitorStarted = false
+    private var silenceTimer: DispatchSourceTimer?
+
+    var isInCall: Bool { callObserver.calls.contains { !$0.hasEnded } }
+
+    private func setupCallMonitoring() {
+        guard !callMonitorStarted else { return }
+        callMonitorStarted = true
+        let d = CallDelegate { [weak self] in
+            Task { @MainActor in self?.callStateChanged() }
+        }
+        callDelegate = d
+        callObserver.setDelegate(d, queue: .main)
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+            let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            Task { @MainActor in
+                guard let self else { return }
+                if raw == AVAudioSession.InterruptionType.began.rawValue {
+                    if self.isInCall { await self.suspendAudio() }
+                } else {
+                    self.callStateChanged()
+                }
+            }
+        }
+        nc.addObserver(forName: .AVCaptureSessionWasInterrupted, object: nil, queue: .main) { [weak self] n in
+            let reason = (n.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int)
+                .flatMap { AVCaptureSession.InterruptionReason(rawValue: $0) }
+            Task { @MainActor in
+                guard let self else { return }
+                if reason == .audioDeviceInUseByAnotherClient {
+                    await self.suspendAudio()
+                }
+            }
+        }
+        nc.addObserver(forName: .AVCaptureSessionInterruptionEnded, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.callStateChanged() }
+        }
+    }
+
+    private func callStateChanged() {
+        Task {
+            if isInCall {
+                await suspendAudio()
+            } else if audioSuspended {
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                if !isInCall { await resumeAudio() }
+            }
+        }
+    }
+
+    /// 通话开始：摘掉麦克风输入，让摄像头继续工作；推流用静音音频保持音轨
+    func suspendAudio() async {
+        guard !audioSuspended else { return }
+        audioSuspended = true
+        toastText = "通话中，暂停声音采集"
+        try? await mixer.attachAudio(nil)
+        if isStreaming || stream != nil { startSilence() }
+        await kickCapture()
+    }
+
+    /// 通话结束：重新挂麦克风
+    func resumeAudio() async {
+        guard audioSuspended, micPermission else { return }
+        do {
+            configureAudioSession()
+            try await mixer.attachAudio(AVCaptureDevice.default(for: .audio))
+            stopSilence()
+            audioSuspended = false
+            await applyMicMute()
+            configureAudioSession()
+            toastText = "通话结束，已恢复声音采集"
+        } catch {
+            // 仍被占用，稍后再试
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if !isInCall { await resumeAudio() }
+            return
+        }
+        await kickCapture()
+    }
+
+    /// 采集会话被中断后重新启动（不影响推流连接）
+    private func kickCapture() async {
+        stallSeconds = 0
+        let f0 = counter.videoFrames
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        if counter.videoFrames == f0 {
+            if !(await mixer.isRunning) { await mixer.startRunning() }
+            // 触发 HaishinKit 内部 session.startRunningIfNeeded()
+            NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            if counter.videoFrames == f0 { await attachCamera() }
+        }
+        stallSeconds = 0
+    }
+
+    private func startSilence() {
+        guard silenceTimer == nil, let stream else { return }
+        silenceTimer = SilenceFeeder.make(stream)
+    }
+
+    private func stopSilence() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
+    }
+
     func saveAll() {
         camera.save()
         UserDefaults.standard.set(Double(zoom), forKey: "zoom")
@@ -743,6 +865,7 @@ final class StreamModel: ObservableObject {
         await stream.addOutput(counter)
         await mixer.addOutput(stream)
         if !(await mixer.isRunning) { await mixer.startRunning() }
+        if audioSuspended || !micPermission { startSilence() }
         await applyMicMute() // mid-stream mute must survive reconnect without dropping track
 
         // 3. 关键：SRTStream.publish() 只有在已收到视频帧(videoInputFormat != nil)时
@@ -783,6 +906,7 @@ final class StreamModel: ObservableObject {
     }
 
     private func teardown() async {
+        stopSilence()
         statsTimer?.invalidate()
         statsTimer = nil
         meterTimer?.invalidate()
@@ -847,5 +971,31 @@ final class StreamModel: ObservableObject {
                 scheduleReconnect()
             }
         }
+    }
+}
+
+final class CallDelegate: NSObject, CXCallObserverDelegate {
+    let onChange: () -> Void
+    init(_ onChange: @escaping () -> Void) { self.onChange = onChange }
+    func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) { onChange() }
+}
+
+enum SilenceFeeder {
+    nonisolated static func make(_ stream: SRTStream) -> DispatchSourceTimer? {
+        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1) else { return nil }
+        let frames: AVAudioFrameCount = 1024
+        var sampleTime: AVAudioFramePosition = 0
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "silence"))
+        t.schedule(deadline: .now(), repeating: .nanoseconds(Int(1_000_000_000.0 * Double(frames) / 48000)))
+        t.setEventHandler {
+            guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames) else { return }
+            buf.frameLength = frames
+            if let ch = buf.floatChannelData { memset(ch[0], 0, Int(frames) * MemoryLayout<Float>.size) }
+            let when = AVAudioTime(hostTime: mach_absolute_time(), sampleTime: sampleTime, atRate: 48000)
+            sampleTime += AVAudioFramePosition(frames)
+            Task { await stream.append(buf, when: when) }
+        }
+        t.resume()
+        return t
     }
 }
