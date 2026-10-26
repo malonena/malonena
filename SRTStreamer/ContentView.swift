@@ -1,10 +1,10 @@
 import SwiftUI
+import AVFoundation
 
 struct ContentView: View {
     @StateObject private var model = StreamModel()
     @State private var showSettings = false
     @State private var sliderZoom: Double = 1
-    @State private var showCamPanel = false
     @State private var focusPoint: CGPoint?
     @State private var toast: String?
     @Environment(\.scenePhase) private var scenePhase
@@ -109,32 +109,23 @@ struct ContentView: View {
                 .padding(.horizontal, 8).padding(.vertical, 3)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.5)))
 
-            HStack(spacing: 8) {
-                CapsuleButton(icon: "rotate.right", title: model.aspect.rawValue) {
+            HStack(spacing: 12) {
+                IconCircleButton(icon: "rotate.right") {
                     let all = AspectOption.allCases
                     model.aspect = all[((all.firstIndex(of: model.aspect) ?? 0) + 1) % all.count]
                 }
                 .disabled(model.isStreaming)
-                CapsuleButton(icon: "rectangle.on.rectangle", title: model.resolution.rawValue) {
+                .opacity(model.isStreaming ? 0.5 : 1)
+                IconCircleButton(icon: "rectangle.on.rectangle") {
                     let all = ResolutionOption.allCases
                     model.resolution = all[((all.firstIndex(of: model.resolution) ?? 0) + 1) % all.count]
                     model.applyResolution()
                 }
                 .disabled(model.isStreaming)
                 .opacity(model.isStreaming ? 0.5 : 1)
-                Button(action: { model.toggleMic() }) {
-                    Image(systemName: model.micEnabled ? "mic.fill" : "mic.slash.fill")
-                        .rotationEffect(.degrees(model.uiAngle))
-                        .font(.footnote.weight(.semibold))
-                        .foregroundColor(model.micEnabled ? .white : .orange)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.55)))
-                }
-                CapsuleButton(icon: "lock.fill", title: "一键锁屏推流") {
-                    model.oneTapLockStream()
-                }
-                CapsuleButton(icon: "slider.horizontal.3", title: "参数") {
-                    showCamPanel.toggle()
+                IconCircleButton(icon: model.micEnabled ? "mic.fill" : "mic.slash.fill",
+                                 tint: model.micEnabled ? .white : .orange) {
+                    model.toggleMic()
                 }
             }
             if model.orientationLockedHint {
@@ -147,19 +138,12 @@ struct ContentView: View {
                 Text("重连中…第\(model.reconnectAttempt)次")
                     .font(.caption2).foregroundColor(.orange)
             }
-            if showCamPanel {
-                CameraPanel(cam: model.camera, onStab: { model.setStabilization($0) })
-                    .padding(10)
-                    .frame(maxWidth: 360)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.6)))
-            }
         }
     }
 
     private var zoomControls: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                Spacer()
                 ForEach(zoomPresets, id: \.self) { z in
                     let unsupported = z < 1 && !model.hasUltraWide
                     Button(action: {
@@ -171,12 +155,24 @@ struct ContentView: View {
                             .font(.footnote.weight(.bold))
                             .foregroundColor(unsupported ? .white.opacity(0.35) :
                                 (abs(Double(model.zoom) - z) < 0.01 ? .yellow : .white))
+                            .lineLimit(1)
+                            .fixedSize()
                             .rotationEffect(.degrees(model.uiAngle))
-                            .frame(width: 44, height: 30)
+                            .frame(maxWidth: .infinity, minHeight: 40)
                             .background(Capsule().fill(Color.black.opacity(unsupported ? 0.3 : 0.55)))
                     }
                 }
-                Spacer()
+                Button(action: { model.oneTapLockStream() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.fill")
+                        Text("锁屏").lineLimit(1).fixedSize()
+                    }
+                    .font(.footnote.weight(.bold))
+                    .foregroundColor(.white)
+                    .rotationEffect(.degrees(model.uiAngle))
+                    .frame(maxWidth: .infinity, minHeight: 40)
+                    .background(Capsule().fill(Color.red.opacity(0.6)))
+                }
             }
             HStack(spacing: 10) {
                 Text(zoomLabel(model.zoom))
@@ -283,6 +279,23 @@ struct CapsuleButton: View {
     }
 }
 
+struct IconCircleButton: View {
+    @Environment(\.uiAngle) private var angle
+    let icon: String
+    var tint: Color = .white
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .rotationEffect(.degrees(angle))
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(tint)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(Color.black.opacity(0.55)))
+        }
+    }
+}
+
 struct RoundIconButton: View {
     @Environment(\.uiAngle) private var angle
     let icon: String
@@ -376,10 +389,11 @@ struct SettingsSheet: View {
                 }
                 .disabled(model.isStreaming)
 
-                Section(header: Text("相机参数")) {
-                    CameraPanel(cam: model.camera, onStab: { model.setStabilization($0) })
+                Section(header: Text("相机")) {
+                    NavigationLink(destination: CameraParamsPage(model: model)) {
+                        Label("相机参数", systemImage: "slider.horizontal.3")
+                    }
                 }
-                .disabled(model.isStreaming)
                 Section(header: Text("旋转"), footer: Text("自动模式用陀螺仪判断方向（系统锁定旋转时也有效）；推流中方向锁定，停止后生效。")) {
                     Picker("旋转", selection: $model.rotationMode) {
                         ForEach(RotationMode.allCases) { Text($0.rawValue).tag($0) }
@@ -388,6 +402,15 @@ struct SettingsSheet: View {
                 .disabled(model.isStreaming)
                 Section(header: Text("推流"), footer: Text("自动开始推流仅在地址有效且不含「密钥」占位时生效。解锁不会停止推流。静音时仍发送静音音频包，断流检测不受影响。")) {
                     Toggle("声音采集", isOn: $model.micEnabled)
+                    Toggle("降噪/指向麦克风", isOn: $model.noiseReduction)
+                    if !model.micInfo.isEmpty {
+                        Text("当前麦克风：\(model.micInfo)").font(.footnote).foregroundColor(.secondary)
+                    }
+                    if #available(iOS 15.0, *) {
+                        Button("系统麦克风模式（语音突显）") {
+                            AVCaptureDevice.showSystemUserInterface(.microphoneModes)
+                        }
+                    }
                     Toggle("断流自动重连", isOn: $model.autoReconnect)
                         .disabled(model.isStreaming)
                     Toggle("启动 App 后自动开始推流", isOn: $model.autoStartOnLaunch)
@@ -482,5 +505,19 @@ struct AudioMeter: View {
     private func color(_ i: Int) -> Color {
         let f = Double(i) / Double(bars - 1)
         return f < 0.6 ? .green : (f < 0.85 ? .yellow : .red)
+    }
+}
+
+struct CameraParamsPage: View {
+    @ObservedObject var model: StreamModel
+    var body: some View {
+        Form {
+            Section(footer: Text("推流中不可修改相机参数。")) {
+                CameraPanel(cam: model.camera, onStab: { model.setStabilization($0) })
+            }
+            .disabled(model.isStreaming)
+        }
+        .navigationTitle("相机参数")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

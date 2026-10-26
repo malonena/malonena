@@ -135,6 +135,50 @@ final class StreamModel: ObservableObject {
             Task { await applyMicMute() }
         }
     }
+    /// 降噪/指向麦克风（videoRecording 模式 + 心形指向）
+    @Published var noiseReduction: Bool = (UserDefaults.standard.object(forKey: "noiseReduction") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(noiseReduction, forKey: "noiseReduction")
+            configureAudioSession()
+        }
+    }
+    @Published var micInfo: String = ""
+
+    /// 配置音频会话：降噪开启时用 .videoRecording 模式（系统波束成形/降噪），并选择与镜头同向的内置麦克风 + 心形指向
+    func configureAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord,
+                                    mode: noiseReduction ? .videoRecording : .default,
+                                    options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setActive(true)
+        } catch {
+            micInfo = "音频会话配置失败"
+            return
+        }
+        guard noiseReduction else { micInfo = "降噪关闭"; return }
+        guard let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) else {
+            micInfo = "未找到内置麦克风"; return
+        }
+        do { try session.setPreferredInput(builtIn) } catch {}
+        let want: AVAudioSession.Orientation = (position == .front) ? .front : .back
+        let sources = builtIn.dataSources ?? []
+        let src = sources.first(where: { $0.orientation == want })
+            ?? sources.first(where: { $0.orientation == .bottom })
+            ?? sources.first
+        guard let ds = src else { micInfo = "内置麦克风（无数据源）"; return }
+        var pattern = "默认"
+        if let pats = ds.supportedPolarPatterns {
+            if pats.contains(.cardioid) {
+                try? ds.setPreferredPolarPattern(.cardioid); pattern = "心形指向"
+            } else if pats.contains(.subcardioid) {
+                try? ds.setPreferredPolarPattern(.subcardioid); pattern = "次心形指向"
+            }
+        }
+        try? builtIn.setPreferredDataSource(ds)
+        micInfo = "\(ds.dataSourceName) · \(pattern)"
+    }
+
     @Published var reconnectAttempt = 0
     @Published var isReconnecting = false
     private var wantStreaming = false
@@ -201,6 +245,8 @@ final class StreamModel: ObservableObject {
         }
         await mixer.addOutput(previewView) // 预览始终直接来自 mixer
         await mixer.startRunning()
+        // HaishinKit 挂载音频/启动会话后再设置，避免被覆盖
+        configureAudioSession()
         if autoStartOnLaunch {
             await maybeAutoStart(thenLock: autoLockAfterStart)
         }
@@ -370,7 +416,10 @@ final class StreamModel: ObservableObject {
     func flipCamera() {
         position = (position == .back) ? .front : .back
         zoom = 1
-        Task { await attachCamera() }
+        Task {
+            await attachCamera()
+            configureAudioSession()
+        }
     }
 
     var minZoom: CGFloat { hasUltraWide ? 0.5 : 1 }
@@ -516,7 +565,7 @@ final class StreamModel: ObservableObject {
 
     /// 回到前台：若推流中断则自动重启
     func onForeground() {
-        try? AVAudioSession.sharedInstance().setActive(true)
+        configureAudioSession()
         Task {
             if !(await mixer.isRunning) { await mixer.startRunning() }
             if currentDevice == nil { await attachCamera() }
