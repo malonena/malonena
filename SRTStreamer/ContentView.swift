@@ -5,6 +5,7 @@ struct ContentView: View {
     @StateObject private var model = StreamModel()
     @State private var showSettings = false
     @State private var sliderZoom: Double = 1
+    @State private var showCamPanel = false
     @State private var focusPoint: CGPoint?
     @State private var toast: String?
     @Environment(\.scenePhase) private var scenePhase
@@ -127,6 +128,9 @@ struct ContentView: View {
                                  tint: model.micEnabled ? .white : .orange) {
                     model.toggleMic()
                 }
+                IconCircleButton(icon: "slider.horizontal.3", tint: showCamPanel ? .yellow : .white) {
+                    withAnimation { showCamPanel.toggle() }
+                }
             }
             if model.orientationLockedHint {
                 Text("推流中已锁定方向，停止后生效")
@@ -137,6 +141,14 @@ struct ContentView: View {
             if model.isReconnecting {
                 Text("重连中…第\(model.reconnectAttempt)次")
                     .font(.caption2).foregroundColor(.orange)
+            }
+            if showCamPanel {
+                ScrollView {
+                    CameraPanel(cam: model.camera, onStab: { model.setStabilization($0) })
+                }
+                .frame(maxWidth: 360, maxHeight: 320)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.6)))
             }
         }
     }
