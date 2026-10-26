@@ -29,7 +29,7 @@ struct ContentView: View {
         let ar = model.isLandscapeOutput ? "横屏" : "竖屏"
         let head = model.aspect == .auto ? "自动\(ar)" : ar
         let kb = model.isStreaming && model.currentKbps > 0 ? model.currentKbps : model.bitrateKbps
-        var t = "\(head) · \(model.resolution.cn) \(Int(s.width))×\(Int(s.height)) · \(model.effectiveFps)帧/秒 · \(model.qualityMode.rawValue) " + String(format: "%.1f兆比特/秒", Double(kb) / 1000)
+        var t = "\(head) · \(model.effectiveResolution.cn)\(model.autoResolution != nil ? "（自动降级）" : "") \(Int(s.width))×\(Int(s.height)) · \(model.effectiveFps)帧/秒 · \(model.qualityMode.rawValue) " + String(format: "%.1f兆比特/秒", Double(kb) / 1000)
         if model.isStreaming { t += String(format: " · 发送 %.2f兆比特/秒", model.sendMbps) }
         return t
     }

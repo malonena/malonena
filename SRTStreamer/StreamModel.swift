@@ -102,7 +102,14 @@ final class StreamModel: ObservableObject {
     }
     /// 画质模式：流畅 = 手动码率的 60%；高质量 = 手动码率；自动 = 按网络在 [40%, 手动码率] 之间自适应
     @Published var qualityMode: QualityMode = QualityMode(rawValue: UserDefaults.standard.string(forKey: "qualityMode") ?? "") ?? .auto {
-        didSet { UserDefaults.standard.set(qualityMode.rawValue, forKey: "qualityMode"); retarget() }
+        didSet {
+            UserDefaults.standard.set(qualityMode.rawValue, forKey: "qualityMode")
+            if qualityMode != .auto && autoResolution != nil {
+                autoResolution = nil
+                Task { await applyLiveSize() }
+            }
+            retarget()
+        }
     }
     /// 当前实际编码码率
     @Published var currentKbps: Int = 0
@@ -133,6 +140,21 @@ final class StreamModel: ObservableObject {
         await stream.setVideoSettings(v)
         appliedKbps = currentKbps
     }
+    private func lowerRes(_ r: ResolutionOption) -> ResolutionOption? {
+        switch r { case .k2: return .p1080; case .p1080: return .p720; case .p720: return nil }
+    }
+    private func higherRes(_ r: ResolutionOption) -> ResolutionOption? {
+        guard r != resolution else { return nil }
+        switch r { case .p720: return .p1080; case .p1080: return .k2; case .k2: return nil }
+    }
+    /// 推流中直接修改编码尺寸（不断流，编码器自动重建会话）
+    private func applyLiveSize() async {
+        guard let stream else { return }
+        var v = await stream.videoSettings
+        v.videoSize = outputSize
+        await stream.setVideoSettings(v)
+        stallSeconds = 0
+    }
     /// 自动模式：根据丢包/丢帧/发送缓冲调整码率
     private func adapt(_ p: SRTPerformanceData) async {
         let loss = p.pktSndLossTotal, drop = p.pktSndDropTotal
@@ -142,12 +164,28 @@ final class StreamModel: ObservableObject {
         let congested = dDrop > 0 || dLoss > 30 || p.msSndBuf > 800
         if congested {
             goodSeconds = 0
+            if currentKbps <= minAutoKbps {
+                floorSeconds += 1
+                // 码率已到下限且持续拥塞 5 秒：降一级分辨率
+                if floorSeconds >= 5, let lower = lowerRes(effectiveResolution) {
+                    floorSeconds = 0
+                    autoResolution = lower
+                    await applyLiveSize()
+                }
+            } else { floorSeconds = 0 }
             currentKbps = max(minAutoKbps, currentKbps * 3 / 4)
         } else {
+            floorSeconds = 0
             goodSeconds += 1
             if goodSeconds >= 8 && currentKbps < baseTargetKbps {
                 goodSeconds = 0
                 currentKbps = min(baseTargetKbps, currentKbps * 11 / 10 + 100)
+            } else if goodSeconds >= 30 && autoResolution != nil {
+                // 稳定 30 秒后升回一级分辨率
+                goodSeconds = 0
+                let up = higherRes(effectiveResolution)
+                autoResolution = (up == nil || up == resolution) ? nil : up
+                await applyLiveSize()
             }
         }
         await applyLiveBitrate()
@@ -418,8 +456,12 @@ final class StreamModel: ObservableObject {
         return .landscapeRight
     }
 
+    /// 自动模式下网络拥塞时可临时降低的实际推流分辨率（nil = 使用用户设置）
+    @Published var autoResolution: ResolutionOption?
+    var effectiveResolution: ResolutionOption { autoResolution ?? resolution }
+    private var floorSeconds = 0
     var outputSize: CGSize {
-        let s = resolution.size
+        let s = effectiveResolution.size
         return isLandscapeOutput ? CGSize(width: s.height, height: s.width) : s
     }
 
@@ -691,7 +733,7 @@ final class StreamModel: ObservableObject {
         )
         v.frameInterval = 0
         await stream.setVideoSettings(v)
-        currentKbps = baseTargetKbps; appliedKbps = currentKbps
+        currentKbps = baseTargetKbps; appliedKbps = currentKbps; floorSeconds = 0
         goodSeconds = 0; lastLoss = 0; lastDrop = 0
         var a = await stream.audioSettings
         a.bitRate = 128 * 1000
@@ -735,6 +777,7 @@ final class StreamModel: ObservableObject {
     }
 
     private func stop() async {
+        autoResolution = nil
         await teardown()
         status = "已停止"
     }
