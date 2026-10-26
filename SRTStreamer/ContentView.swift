@@ -29,7 +29,7 @@ struct ContentView: View {
         let ar = model.isLandscapeOutput ? "横屏" : "竖屏"
         let head = model.aspect == .auto ? "自动\(ar)" : ar
         let kb = model.isStreaming && model.currentKbps > 0 ? model.currentKbps : model.bitrateKbps
-        var t = "\(head) · \(model.effectiveResolution.cn)\(model.autoResolution != nil ? "（自动降级）" : "") \(Int(s.width))×\(Int(s.height)) · \(model.effectiveFps)帧/秒 · \(model.qualityMode.rawValue) " + String(format: "%.1f兆比特/秒", Double(kb) / 1000)
+        var t = "\(model.line.rawValue) · \(head) · \(model.effectiveResolution.cn)\(model.autoResolution != nil ? "（自动降级）" : "") \(Int(s.width))×\(Int(s.height)) · \(model.effectiveFps)帧/秒 · \(model.qualityMode.rawValue) " + String(format: "%.1f兆比特/秒", Double(kb) / 1000)
         if model.isStreaming { t += String(format: " · 发送 %.2f兆比特/秒", model.sendMbps) }
         return t
     }
@@ -58,7 +58,7 @@ struct ContentView: View {
                 topInfo
                 Spacer()
                 zoomControls
-                inputPanel
+                    .padding(.bottom, 6)
                 bottomRow
             }
             .padding(.horizontal, 16)
@@ -191,59 +191,6 @@ struct ContentView: View {
         return String(format: "%.1f倍", Double(z))
     }
 
-    private var inputPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("线路").font(.footnote).foregroundColor(.white.opacity(0.8)).frame(width: 56, alignment: .leading)
-                Picker("线路", selection: $model.line) {
-                    ForEach(StreamLine.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .disabled(model.isStreaming)
-            }
-            HStack(spacing: 8) {
-                Text("推流地址").font(.footnote).foregroundColor(.white.opacity(0.8)).lineLimit(1).fixedSize().frame(width: 56, alignment: .leading)
-                TextField("推流地址", text: $model.addressText)
-                    .font(.system(.footnote, design: .monospaced))
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-                    .keyboardType(.URL)
-                    .lineLimit(1)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 10).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6)))
-                    .disabled(model.isStreaming)
-            }
-            HStack(spacing: 8) {
-                Text("密钥").font(.footnote).foregroundColor(.white.opacity(0.8)).frame(width: 56, alignment: .leading)
-                TextField("输入\(model.line.rawValue)推流密钥", text: $model.keyText)
-                .font(.system(.footnote, design: .monospaced))
-                .autocapitalization(.none)
-                .disableAutocorrection(true)
-                .keyboardType(.URL)
-                .lineLimit(1)
-                .foregroundColor(.white)
-                .padding(.horizontal, 10).padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6)))
-                .disabled(model.isStreaming)
-            }
-            HStack(spacing: 8) {
-                Text("延迟").font(.footnote).foregroundColor(.white.opacity(0.8))
-                TextField("0", text: $model.latencyText)
-                    .font(.system(.footnote, design: .monospaced))
-                    .keyboardType(.numberPad)
-                    .frame(width: 70)
-                    .padding(.horizontal, 8).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.6)))
-                    .disabled(model.isStreaming)
-                Text("毫秒（0=默认）").font(.footnote).foregroundColor(.white.opacity(0.6))
-                Spacer()
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.45)))
-    }
-
     private var bottomRow: some View {
         HStack {
             RoundIconButton(icon: "gearshape.fill") { showSettings = true }
@@ -346,6 +293,36 @@ struct SettingsSheet: View {
     var body: some View {
         NavigationView {
             Form {
+                Section(header: Text("推流地址"),
+                        footer: Text(model.isStreaming ? "推流中不可修改推流地址和密钥。" : "最终地址：推流地址?streamid=\(model.line.prefix)密钥。粘贴完整地址会自动识别线路并填入密钥。")) {
+                    Picker("线路", selection: $model.line) {
+                        ForEach(StreamLine.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    HStack {
+                        Text("推流地址").frame(width: 72, alignment: .leading)
+                        TextField("srt://主机:端口", text: $model.addressText)
+                            .font(.system(.body, design: .monospaced))
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .keyboardType(.URL)
+                    }
+                    HStack {
+                        Text("密钥").frame(width: 72, alignment: .leading)
+                        TextField("输入\(model.line.rawValue)推流密钥", text: $model.keyText)
+                            .font(.system(.body, design: .monospaced))
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                    }
+                    HStack {
+                        Text("延迟").frame(width: 72, alignment: .leading)
+                        TextField("0", text: $model.latencyText)
+                            .font(.system(.body, design: .monospaced))
+                            .keyboardType(.numberPad)
+                        Text("毫秒（0=默认）").foregroundColor(.secondary)
+                    }
+                }
+                .disabled(model.isStreaming)
                 Section(header: Text("视频"),
                         footer: Text(model.isStreaming ? "推流中不可修改分辨率、帧率和画面比例，停止推流后可修改。" : "超清2K 用 4K 采集再缩放到 2560×1440。60帧/秒需要设备支持对应分辨率；不支持时会自动保持 30帧/秒。")) {
                     Picker("画面比例", selection: $model.aspect) {
