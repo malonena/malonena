@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreMotion
 import HaishinKit
 import SRTHaishinKit
 import SwiftUI
@@ -47,6 +48,13 @@ enum ResolutionOption: String, CaseIterable, Identifiable {
         case .k2: return 10000
         }
     }
+}
+
+enum RotationMode: String, CaseIterable, Identifiable {
+    case auto = "自动（陀螺仪）"
+    case portrait = "手动锁定竖屏"
+    case landscape = "手动锁定横屏"
+    var id: String { rawValue }
 }
 
 enum AspectOption: String, CaseIterable, Identifiable {
@@ -107,6 +115,47 @@ final class StreamModel: ObservableObject {
     @Published var sendMbps: Double = 0
     @Published var sentKB: UInt64 = 0
 
+    // 断流自动重连
+    @Published var autoReconnect: Bool = (UserDefaults.standard.object(forKey: "autoReconnect") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(autoReconnect, forKey: "autoReconnect") }
+    }
+    @Published var isLocked = false
+    @Published var reconnectAttempt = 0
+    @Published var isReconnecting = false
+    private var wantStreaming = false
+    private var reconnectTask: Task<Void, Never>?
+    private var lastSentKB: UInt64 = 0
+    private var stallSeconds = 0
+
+    // 陀螺仪方向
+    @Published var rotationMode: RotationMode = RotationMode(rawValue: UserDefaults.standard.string(forKey: "rotationMode") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(rotationMode.rawValue, forKey: "rotationMode"); syncOrientation() }
+    }
+    /// 物理方向（陀螺仪），用于 UI 旋转
+    @Published var physicalOrientation: UIDeviceOrientation = .portrait
+    private var orientationForCapture: UIDeviceOrientation = .portrait
+    private let motion = CMMotionManager()
+
+    /// UI 控件旋转角度
+    var uiAngle: Double {
+        let o: UIDeviceOrientation
+        switch rotationMode {
+        case .auto: o = physicalOrientation
+        case .portrait: o = .portrait
+        case .landscape: o = .landscapeLeft
+        }
+        switch o {
+        case .landscapeLeft: return 90
+        case .landscapeRight: return -90
+        default: return 0
+        }
+    }
+    var orientationLockedHint: Bool {
+        isStreaming && rotationMode == .auto && aspect == .auto && physicalOrientation.isLandscape != deviceLandscape
+    }
+
+    let camera = CameraControl()
+
     let previewView = MTHKView(frame: .zero)
     private let mixer = MediaMixer(multiCamSessionEnabled: false, multiTrackAudioMixingEnabled: false, useManualCapture: true)
     private var connection: SRTConnection?
@@ -127,14 +176,7 @@ final class StreamModel: ObservableObject {
         if !audioOK { status = "没有麦克风权限（仅视频）" }
 
         await mixer.setSessionPreset(resolution.preset)
-        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        updateDeviceOrientation()
-        orientationObserver = NotificationCenter.default.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateDeviceOrientation()
-                self?.applyOrientation()
-            }
-        }
+        startMotion()
         await mixer.setVideoOrientation(captureOrientation)
         await attachCamera()
         if audioOK {
@@ -147,9 +189,35 @@ final class StreamModel: ObservableObject {
 
     // MARK: - 方向
 
-    private func updateDeviceOrientation() {
-        let o = UIDevice.current.orientation
-        if o.isLandscape { deviceLandscape = true } else if o == .portrait || o == .portraitUpsideDown { deviceLandscape = false }
+    private func startMotion() {
+        guard motion.isDeviceMotionAvailable else { return }
+        motion.deviceMotionUpdateInterval = 0.2
+        motion.startDeviceMotionUpdates(to: .main) { [weak self] m, _ in
+            guard let self, let g = m?.gravity else { return }
+            var o: UIDeviceOrientation?
+            if g.x < -0.7 { o = .landscapeLeft }
+            else if g.x > 0.7 { o = .landscapeRight }
+            else if g.y < -0.7 { o = .portrait }
+            else if g.y > 0.7 { o = .portraitUpsideDown }
+            if let o, o != self.physicalOrientation {
+                self.physicalOrientation = o
+                self.syncOrientation()
+            }
+        }
+    }
+
+    /// 非推流时同步采集方向（推流中锁定，避免编码分辨率变化）
+    func syncOrientation() {
+        guard !isStreaming, !isBusy else { return }
+        switch rotationMode {
+        case .auto:
+            let o = physicalOrientation
+            if o.isLandscape { deviceLandscape = true; orientationForCapture = o }
+            else { deviceLandscape = false; orientationForCapture = .portrait }
+        case .portrait: deviceLandscape = false; orientationForCapture = .portrait
+        case .landscape: deviceLandscape = true; orientationForCapture = .landscapeLeft
+        }
+        applyOrientation()
     }
 
     var isLandscapeOutput: Bool {
@@ -162,7 +230,7 @@ final class StreamModel: ObservableObject {
 
     var captureOrientation: AVCaptureVideoOrientation {
         guard isLandscapeOutput else { return .portrait }
-        if aspect == .auto && UIDevice.current.orientation == .landscapeRight { return .landscapeLeft }
+        if aspect == .auto && orientationForCapture == .landscapeRight { return .landscapeLeft }
         return .landscapeRight
     }
 
@@ -192,6 +260,8 @@ final class StreamModel: ObservableObject {
         let pos = position
         let dev = pickDevice(pos)
         currentDevice = dev
+        camera.device = dev
+        camera.position = pos
         if let dev, dev.constituentDevices.contains(where: { $0.deviceType == .builtInUltraWideCamera }) {
             hasUltraWide = true
             zoomScale = 2 // 虚拟设备 1.0 = 超广角，2.0 = 广角(1x)
@@ -204,13 +274,16 @@ final class StreamModel: ObservableObject {
             cameraError = "找不到摄像头设备"
             return
         }
+        let stab = camera.stabilization.mode
         do {
             try await mixer.attachVideo(device, track: 0) { unit in
                 unit.isVideoMirrored = (pos == .front)
+                unit.preferredVideoStabilizationMode = stab
             }
             cameraError = nil
             applyZoomFactor()
             await applyFrameRateNow()
+            camera.reapply()
         } catch {
             cameraError = "摄像头连接失败: \(error.localizedDescription)"
         }
@@ -299,7 +372,70 @@ final class StreamModel: ObservableObject {
     // MARK: - 推流
 
     func toggle() {
-        if isStreaming { Task { await stop() } } else { Task { await start() } }
+        if isStreaming || isReconnecting {
+            wantStreaming = false
+            cancelReconnect()
+            Task { await stop() }
+        } else {
+            wantStreaming = true
+            Task {
+                await start()
+                if !isStreaming { scheduleReconnect() }
+            }
+        }
+    }
+
+    func setStabilization(_ m: StabilizationOption) {
+        camera.stabilization = m
+        let mode = m.mode
+        Task { try? await mixer.configuration(video: 0) { unit in unit.preferredVideoStabilizationMode = mode } }
+    }
+
+    // MARK: - 自动重连
+
+    private var shouldReconnect: Bool { wantStreaming && (autoReconnect || isLocked) }
+
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        isReconnecting = false
+        reconnectAttempt = 0
+    }
+
+    func scheduleReconnect() {
+        guard shouldReconnect, reconnectTask == nil else { return }
+        isReconnecting = true
+        reconnectTask = Task { @MainActor in
+            var attempt = 0
+            while !Task.isCancelled && shouldReconnect && !isStreaming {
+                let delay = min(5.0, pow(2.0, Double(attempt)))
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                if Task.isCancelled || !shouldReconnect { break }
+                attempt += 1
+                reconnectAttempt = attempt
+                if !isBusy { await start() }
+                if isStreaming { status = "推流中（已重连）" }
+            }
+            reconnectTask = nil
+            isReconnecting = false
+            if isStreaming { reconnectAttempt = 0 }
+        }
+    }
+
+    /// 回到前台：若推流中断则自动重启
+    func onForeground() {
+        try? AVAudioSession.sharedInstance().setActive(true)
+        Task {
+            if !(await mixer.isRunning) { await mixer.startRunning() }
+            if currentDevice == nil { await attachCamera() }
+            let f0 = counter.videoFrames
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if isStreaming && counter.videoFrames == f0 { await attachCamera() }
+        }
+        if wantStreaming && !isStreaming && !isBusy {
+            if !status.contains("断开") && !status.contains("失败") { status = "连接已断开（后台期间）" }
+            scheduleReconnect()
+        }
     }
 
     private func start() async {
@@ -389,6 +525,8 @@ final class StreamModel: ObservableObject {
     }
 
     private func startStats() {
+        lastSentKB = 0
+        stallSeconds = 0
         statsTimer?.invalidate()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.updateStats() }
@@ -405,6 +543,18 @@ final class StreamModel: ObservableObject {
         if !(await connection.connected) && isStreaming {
             status = "连接已断开"
             await teardown()
+            scheduleReconnect()
+            return
+        }
+        if isStreaming {
+            if sentKB == lastSentKB { stallSeconds += 1 } else { stallSeconds = 0 }
+            lastSentKB = sentKB
+            if stallSeconds >= 3 {
+                stallSeconds = 0
+                status = "连接已断开（无数据发送）"
+                await teardown()
+                scheduleReconnect()
+            }
         }
     }
 }

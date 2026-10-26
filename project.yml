@@ -30,6 +30,7 @@ targets:
         UIViewControllerBasedStatusBarAppearance: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
+        NSMotionUsageDescription: 需要使用陀螺仪判断手机方向以自动旋转画面
         NSCameraUsageDescription: 需要使用摄像头采集视频进行推流
         NSMicrophoneUsageDescription: 需要使用麦克风采集声音进行推流
         NSLocalNetworkUsageDescription: 需要访问本地网络以连接推流服务器

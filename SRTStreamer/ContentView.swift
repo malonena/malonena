@@ -4,14 +4,16 @@ struct ContentView: View {
     @StateObject private var model = StreamModel()
     @State private var showSettings = false
     @State private var sliderZoom: Double = 1
-    @State private var isLocked = false
+    @State private var showCamPanel = false
+    @State private var focusPoint: CGPoint?
+    @Environment(\.scenePhase) private var scenePhase
 
     private var hasError: Bool {
         model.cameraError != nil || ["失败", "错误", "断开", "无法", "没有", "请把", "未收到"].contains { model.status.contains($0) }
     }
     private var statusColor: Color {
         if hasError { return .red }
-        if model.isStreaming { return .green }
+        if model.isStreaming { return .red }
         if model.isBusy { return .yellow }
         return .gray
     }
@@ -34,6 +36,21 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             PreviewView(view: model.previewView).ignoresSafeArea()
+                .opacity(model.isLocked ? 0 : 1)
+            GeometryReader { geo in
+                Color.clear.contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0).onEnded { v in
+                        guard abs(v.translation.width) < 10, abs(v.translation.height) < 10 else { return }
+                        model.camera.focus(at: CGPoint(x: v.location.x / geo.size.width, y: v.location.y / geo.size.height))
+                        focusPoint = v.location
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { focusPoint = nil }
+                    })
+                if let fp = focusPoint {
+                    RoundedRectangle(cornerRadius: 4).stroke(Color.yellow, lineWidth: 1.5)
+                        .frame(width: 70, height: 70).position(fp)
+                }
+            }
+            .ignoresSafeArea()
             VStack(alignment: .leading, spacing: 10) {
                 topInfo
                 Spacer()
@@ -44,9 +61,9 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 12)
-            .opacity(isLocked ? 0 : 1)
-            if isLocked {
-                LockOverlay(model: model, isLocked: $isLocked)
+            .opacity(model.isLocked ? 0 : 1)
+            if model.isLocked {
+                LockOverlay(model: model, isLocked: $model.isLocked)
                     .zIndex(10)
             }
         }
@@ -54,6 +71,10 @@ struct ContentView: View {
         .statusBar(hidden: true)
         .sheet(isPresented: $showSettings) { SettingsSheet(model: model) }
         .task { await model.setup() }
+        .environment(\.uiAngle, model.uiAngle)
+        .animation(.easeInOut(duration: 0.3), value: model.uiAngle)
+        .onChange(of: model.isStreaming) { s in if !s { model.syncOrientation() } }
+        .onChange(of: scenePhase) { ph in if ph == .active { model.onForeground() } }
         .onChange(of: model.zoom) { z in
             if abs(sliderZoom - Double(z)) > 0.001 { sliderZoom = Double(z) }
         }
@@ -62,7 +83,7 @@ struct ContentView: View {
     private var topInfo: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Circle().fill(statusColor).frame(width: 8, height: 8)
+                StatusDot(color: statusColor, pulsing: model.isStreaming && !hasError)
                 Text(statusText)
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(hasError ? .red : .white)
@@ -91,8 +112,27 @@ struct ContentView: View {
                 .disabled(model.isStreaming)
                 .opacity(model.isStreaming ? 0.5 : 1)
                 CapsuleButton(icon: "lock.fill", title: "锁屏") {
-                    isLocked = true
+                    model.isLocked = true
                 }
+                CapsuleButton(icon: "slider.horizontal.3", title: "参数") {
+                    showCamPanel.toggle()
+                }
+            }
+            if model.orientationLockedHint {
+                Text("推流中已锁定方向，停止后生效")
+                    .font(.caption2).foregroundColor(.yellow)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(Color.black.opacity(0.5)))
+            }
+            if model.isReconnecting {
+                Text("重连中…第\(model.reconnectAttempt)次")
+                    .font(.caption2).foregroundColor(.orange)
+            }
+            if showCamPanel {
+                CameraPanel(cam: model.camera, onStab: { model.setStabilization($0) })
+                    .padding(10)
+                    .frame(maxWidth: 360)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.6)))
             }
         }
     }
@@ -106,6 +146,7 @@ struct ContentView: View {
                         Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
                             .font(.footnote.weight(.bold))
                             .foregroundColor(abs(Double(model.zoom) - z) < 0.01 ? .yellow : .white)
+                            .rotationEffect(.degrees(model.uiAngle))
                             .frame(width: 44, height: 30)
                             .background(Capsule().fill(Color.black.opacity(0.55)))
                     }
@@ -192,13 +233,14 @@ struct ContentView: View {
 }
 
 struct CapsuleButton: View {
+    @Environment(\.uiAngle) private var angle
     let icon: String
     let title: String
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: icon)
+                Image(systemName: icon).rotationEffect(.degrees(angle))
                 Text(title)
             }
             .font(.footnote.weight(.semibold))
@@ -210,11 +252,13 @@ struct CapsuleButton: View {
 }
 
 struct RoundIconButton: View {
+    @Environment(\.uiAngle) private var angle
     let icon: String
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
+                .rotationEffect(.degrees(angle))
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundColor(.white)
                 .frame(width: 50, height: 50)
@@ -295,6 +339,17 @@ struct SettingsSheet: View {
                     }
                 }
 
+                Section(header: Text("相机参数")) {
+                    CameraPanel(cam: model.camera, onStab: { model.setStabilization($0) })
+                }
+                Section(header: Text("旋转"), footer: Text("自动模式用陀螺仪判断方向（系统锁定旋转时也有效）；推流中方向锁定，停止后生效。")) {
+                    Picker("旋转", selection: $model.rotationMode) {
+                        ForEach(RotationMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                }
+                Section(header: Text("推流")) {
+                    Toggle("断流自动重连", isOn: $model.autoReconnect)
+                }
                 Section(header: Text("H.264")) {
                     Picker("Profile", selection: $model.profile) {
                         ForEach(ProfileOption.allCases) { Text($0.rawValue).tag($0) }
@@ -334,5 +389,32 @@ struct SettingsSheet: View {
     static func zoomText(_ z: CGFloat) -> String {
         if abs(z - z.rounded()) < 0.05 && z >= 1 { return "\(Int(z.rounded()))x" }
         return String(format: "%.1fx", Double(z))
+    }
+}
+
+
+private struct UIAngleKey: EnvironmentKey { static let defaultValue: Double = 0 }
+extension EnvironmentValues {
+    var uiAngle: Double {
+        get { self[UIAngleKey.self] }
+        set { self[UIAngleKey.self] = newValue }
+    }
+}
+
+struct StatusDot: View {
+    let color: Color
+    let pulsing: Bool
+    var size: CGFloat = 8
+    @State private var dim = false
+    var body: some View {
+        Circle().fill(color).frame(width: size, height: size)
+            .opacity(pulsing && dim ? 0.2 : 1)
+            .onAppear { start() }
+            .onChange(of: pulsing) { _ in start() }
+    }
+    private func start() {
+        dim = false
+        guard pulsing else { return }
+        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { dim = true }
     }
 }

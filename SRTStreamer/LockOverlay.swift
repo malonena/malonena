@@ -22,7 +22,13 @@ struct LockOverlay: View {
             Color.black.ignoresSafeArea()
             VStack(spacing: 8) {
                 Text("推流中 · 长按 2 秒解锁").font(.footnote)
-                Text(statusLine).font(.caption2.monospacedDigit()).lineLimit(2)
+                HStack(spacing: 5) {
+                    StatusDot(color: model.isStreaming ? .red : Color.gray, pulsing: model.isStreaming, size: 6)
+                    Text(statusLine).font(.caption2.monospacedDigit()).lineLimit(2)
+                }
+                if model.isReconnecting {
+                    Text("重连中…第\(model.reconnectAttempt)次").font(.caption2)
+                }
             }
             .foregroundColor(Color.gray.opacity(0.6))
             .opacity(hintVisible || pressing ? 1 : 0.04)
