@@ -550,6 +550,7 @@ final class StreamModel: ObservableObject {
         await stream.addOutput(counter)
         await mixer.addOutput(stream)
         if !(await mixer.isRunning) { await mixer.startRunning() }
+        await applyMicMute() // mid-stream mute must survive reconnect without dropping track
 
         // 3. 关键：SRTStream.publish() 只有在已收到视频帧(videoInputFormat != nil)时
         //    才会让 TSWriter 期待视频轨，否则只发音频。所以先等摄像头帧到达 stream。

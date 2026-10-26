@@ -93,7 +93,7 @@ struct ContentView: View {
     private var topInfo: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                StatusDot(color: statusColor, pulsing: model.isStreaming && !hasError)
+                StatusDot(color: statusColor, pulsing: model.isStreaming)
                 Text(statusText)
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(hasError ? .red : .white)
@@ -122,6 +122,14 @@ struct ContentView: View {
                 }
                 .disabled(model.isStreaming)
                 .opacity(model.isStreaming ? 0.5 : 1)
+                Button(action: { model.toggleMic() }) {
+                    Image(systemName: model.micEnabled ? "mic.fill" : "mic.slash.fill")
+                        .rotationEffect(.degrees(model.uiAngle))
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(model.micEnabled ? .white : .orange)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.55)))
+                }
                 CapsuleButton(icon: "lock.fill", title: "一键锁屏推流") {
                     model.oneTapLockStream()
                 }
@@ -156,7 +164,7 @@ struct ContentView: View {
                     let unsupported = z < 1 && !model.hasUltraWide
                     Button(action: {
                         if !model.setZoom(CGFloat(z)) {
-                            showToast(model.positionIsFront ? "前置镜头不支持 0.5x" : "当前镜头不支持 0.5x")
+                            showToast("前置镜头不支持 0.5x")
                         }
                     }) {
                         Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
@@ -250,8 +258,6 @@ struct ContentView: View {
             }
             .disabled(model.isBusy)
             Spacer()
-            RoundIconButton(icon: model.micEnabled ? "mic.fill" : "mic.slash.fill",
-                            tint: model.micEnabled ? .white : .red) { model.toggleMic() }
             RoundIconButton(icon: "arrow.triangle.2.circlepath.camera") { model.flipCamera() }
         }
         .padding(.horizontal, 12)
@@ -326,6 +332,7 @@ struct SettingsSheet: View {
                     .pickerStyle(.segmented)
                     .onChange(of: model.fps) { _ in model.applyFrameRate() }
                 }
+                .disabled(model.isStreaming)
 
                 Section(header: Text("码率"), footer: Text("码率跟随分辨率：720p 4M / 1080p 6M / 2K 10M。")) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -341,6 +348,7 @@ struct SettingsSheet: View {
                         kbps = Double(model.bitrateKbps)
                     }
                 }
+                .disabled(model.isStreaming)
 
                 Section(header: Text("镜头 / 变焦"),
                         footer: Text("多镜头模式下变焦会自动切换超广角 / 广角 / 长焦。部分机型在多镜头模式下不支持手动对焦，需要时可关闭多镜头。")) {
@@ -349,7 +357,7 @@ struct SettingsSheet: View {
                     HStack(spacing: 10) {
                         ForEach(zoomPresets, id: \.self) { z in
                             let unsupported = z < 1 && !model.hasUltraWide
-                            Button(action: { _ = model.setZoom(CGFloat(z)) }) {
+                            Button(action: { if model.setZoom(CGFloat(z)) { sliderZoom = z } }) {
                                 Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
                                     .font(.footnote.weight(.bold))
                                     .foregroundColor(unsupported ? .gray :
@@ -366,20 +374,26 @@ struct SettingsSheet: View {
                             .onChange(of: sliderZoom) { v in model.setZoom(CGFloat(v)) }
                     }
                 }
+                .disabled(model.isStreaming)
 
                 Section(header: Text("相机参数")) {
                     CameraPanel(cam: model.camera, onStab: { model.setStabilization($0) })
                 }
+                .disabled(model.isStreaming)
                 Section(header: Text("旋转"), footer: Text("自动模式用陀螺仪判断方向（系统锁定旋转时也有效）；推流中方向锁定，停止后生效。")) {
                     Picker("旋转", selection: $model.rotationMode) {
                         ForEach(RotationMode.allCases) { Text($0.rawValue).tag($0) }
                     }
                 }
+                .disabled(model.isStreaming)
                 Section(header: Text("推流"), footer: Text("自动开始推流仅在地址有效且不含「密钥」占位时生效。解锁不会停止推流。静音时仍发送静音音频包，断流检测不受影响。")) {
                     Toggle("声音采集", isOn: $model.micEnabled)
                     Toggle("断流自动重连", isOn: $model.autoReconnect)
+                        .disabled(model.isStreaming)
                     Toggle("启动 App 后自动开始推流", isOn: $model.autoStartOnLaunch)
+                        .disabled(model.isStreaming)
                     Toggle("自动推流后自动锁屏", isOn: $model.autoLockAfterStart)
+                        .disabled(model.isStreaming)
                 }
                 Section(header: Text("H.264")) {
                     Picker("Profile", selection: $model.profile) {
@@ -387,8 +401,8 @@ struct SettingsSheet: View {
                     }
                     .pickerStyle(.segmented)
                 }
+                .disabled(model.isStreaming)
             }
-            .disabled(model.isStreaming)
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
