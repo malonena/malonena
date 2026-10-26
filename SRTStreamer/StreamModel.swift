@@ -30,9 +30,23 @@ final class StreamModel: ObservableObject {
 
     @AppStorage("srtURL") var urlText: String = StreamModel.defaultURL
     @AppStorage("latency") var latencyText: String = "200"
-    @Published var resolution: ResolutionOption = .p720
-    @Published var bitrateMbps: Int = 4
-    @Published var profile: ProfileOption = .baseline
+    @Published var resolution: ResolutionOption = ResolutionOption(rawValue: UserDefaults.standard.string(forKey: "resolution") ?? "") ?? .p720 {
+        didSet { UserDefaults.standard.set(resolution.rawValue, forKey: "resolution") }
+    }
+    @Published var bitrateMbps: Int = (UserDefaults.standard.object(forKey: "bitrateMbps") as? Int) ?? 4 {
+        didSet { UserDefaults.standard.set(bitrateMbps, forKey: "bitrateMbps") }
+    }
+    @Published var profile: ProfileOption = ProfileOption(rawValue: UserDefaults.standard.string(forKey: "profile") ?? "") ?? .baseline {
+        didSet { UserDefaults.standard.set(profile.rawValue, forKey: "profile") }
+    }
+    @Published var fps: Int = (UserDefaults.standard.object(forKey: "fps") as? Int) ?? 30 {
+        didSet { UserDefaults.standard.set(fps, forKey: "fps") }
+    }
+    /// 用户视角的变焦倍数（0.5 = 超广角）
+    @Published var zoom: CGFloat = 1
+    @Published var hasUltraWide = false
+    private var currentDevice: AVCaptureDevice?
+    private var usingUltraWide = false
 
     @Published var isStreaming = false
     @Published var isBusy = false
@@ -63,7 +77,7 @@ final class StreamModel: ObservableObject {
 
         await mixer.setSessionPreset(resolution.preset)
         await mixer.setVideoOrientation(.portrait)
-        await mixer.setFrameRate(30)
+        await mixer.setFrameRate(Float64(fps))
         await attachCamera()
         if audioOK {
             do { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
@@ -75,7 +89,13 @@ final class StreamModel: ObservableObject {
 
     private func attachCamera() async {
         let pos = position
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: pos) else {
+        hasUltraWide = (pos == .back) && AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) != nil
+        let wantUW = hasUltraWide && zoom < 1
+        let dev = wantUW ? AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: pos)
+                         : AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: pos)
+        usingUltraWide = wantUW
+        currentDevice = dev
+        guard let device = dev else {
             cameraError = "找不到摄像头设备"
             return
         }
@@ -84,6 +104,7 @@ final class StreamModel: ObservableObject {
                 unit.isVideoMirrored = (pos == .front)
             }
             cameraError = nil
+            applyZoomFactor()
         } catch {
             cameraError = "摄像头连接失败: \(error.localizedDescription)"
         }
@@ -91,7 +112,37 @@ final class StreamModel: ObservableObject {
 
     func flipCamera() {
         position = (position == .back) ? .front : .back
+        zoom = 1
         Task { await attachCamera() }
+    }
+
+    func setZoom(_ z: CGFloat) {
+        let minZ: CGFloat = hasUltraWide ? 0.5 : 1
+        let nz = min(max(z, minZ), 10)
+        let needUW = hasUltraWide && nz < 1
+        zoom = nz
+        if needUW != usingUltraWide {
+            Task { await attachCamera() }
+        } else {
+            applyZoomFactor()
+        }
+    }
+
+    private func applyZoomFactor() {
+        guard let d = currentDevice else { return }
+        // 超广角: 0.5x→1.0 ; 广角: 1x→1.0
+        let factor = usingUltraWide ? zoom * 2 : zoom
+        let f = min(max(factor, d.minAvailableVideoZoomFactor), min(d.activeFormat.videoMaxZoomFactor, 10))
+        do {
+            try d.lockForConfiguration()
+            d.videoZoomFactor = f
+            d.unlockForConfiguration()
+        } catch {}
+    }
+
+    func applyFrameRate() {
+        guard !isStreaming else { return }
+        Task { await mixer.setFrameRate(Float64(fps)) }
     }
 
     func applyResolution() {
@@ -113,8 +164,8 @@ final class StreamModel: ObservableObject {
         s = s.replacingOccurrences(of: " ", with: "")
         guard s.lowercased().hasPrefix("srt://") else { return nil }
         let latency = Int(latencyText.trimmingCharacters(in: .whitespaces)) ?? 200
-        if !s.contains("latency=") { s += (s.contains("?") ? "&" : "?") + "latency=\(latency)" }
-        if !s.contains("mode=") { s += "&mode=caller" }
+        if latency > 0 && !s.contains("latency=") { s += (s.contains("?") ? "&" : "?") + "latency=\(latency)" }
+        if !s.contains("mode=") { s += (s.contains("?") ? "&" : "?") + "mode=caller" }
         if let u = URL(string: s) { return u }
         // 非 ASCII 字符（如中文密钥）需要编码
         if let enc = s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.union(CharacterSet(charactersIn: "/:?&="))) {

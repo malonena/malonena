@@ -26,6 +26,8 @@ targets:
         CFBundleVersion: "1"
         UILaunchScreen: {}
         UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
         NSCameraUsageDescription: 需要使用摄像头采集视频进行推流

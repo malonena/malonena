@@ -5,7 +5,7 @@ struct PreviewView: UIViewRepresentable {
     let view: MTHKView
 
     func makeUIView(context: Context) -> MTHKView {
-        view.videoGravity = .resizeAspect
+        view.videoGravity = .resizeAspectFill
         view.backgroundColor = .black
         return view
     }
