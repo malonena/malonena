@@ -1,0 +1,33 @@
+name: Build unsigned IPA
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 16
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Resolve SPM
+        run: xcodebuild -resolvePackageDependencies -project SRTStreamer.xcodeproj -scheme SRTStreamer -clonedSourcePackagesDirPath build/spm
+      - name: Build
+        run: |
+          xcodebuild -project SRTStreamer.xcodeproj -scheme SRTStreamer \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd -clonedSourcePackagesDirPath build/spm \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -skipPackagePluginValidation -skipMacroValidation build
+      - name: Package IPA
+        run: |
+          APP=$(find build/dd/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry SRTStreamer.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SRTStreamer-ipa
+          path: SRTStreamer.ipa
