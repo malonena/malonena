@@ -26,10 +26,11 @@ struct ContentView: View {
     }
     private var caption: String {
         let s = model.outputSize
-        let ar = model.isLandscapeOutput ? "16:9" : "9:16"
-        let head = model.aspect == .auto ? "自动 \(ar)" : ar
-        var t = "\(head) · \(model.resolution.rawValue) \(Int(s.width))×\(Int(s.height)) · \(model.effectiveFps)fps · " + String(format: "%.1fMbps", Double(model.bitrateKbps) / 1000)
-        if model.isStreaming { t += String(format: " · 发送 %.2fMbps", model.sendMbps) }
+        let ar = model.isLandscapeOutput ? "横屏" : "竖屏"
+        let head = model.aspect == .auto ? "自动\(ar)" : ar
+        let kb = model.isStreaming && model.currentKbps > 0 ? model.currentKbps : model.bitrateKbps
+        var t = "\(head) · \(model.resolution.cn) \(Int(s.width))×\(Int(s.height)) · \(model.effectiveFps)帧/秒 · \(model.qualityMode.rawValue) " + String(format: "%.1f兆比特/秒", Double(kb) / 1000)
+        if model.isStreaming { t += String(format: " · 发送 %.2f兆比特/秒", model.sendMbps) }
         return t
     }
     private var zoomPresets: [Double] { [0.5, 1.0, 2.0] }
@@ -183,8 +184,8 @@ struct ContentView: View {
     }
 
     private func zoomLabel(_ z: CGFloat) -> String {
-        if abs(z - z.rounded()) < 0.05 { return "\(Int(z.rounded()))x" }
-        return String(format: "%.1fx", Double(z))
+        if abs(z - z.rounded()) < 0.05 { return "\(Int(z.rounded()))倍" }
+        return String(format: "%.1f倍", Double(z))
     }
 
     private var inputPanel: some View {
@@ -200,7 +201,7 @@ struct ContentView: View {
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6)))
                 .disabled(model.isStreaming)
             HStack(spacing: 8) {
-                Text("Latency").font(.footnote).foregroundColor(.white.opacity(0.8))
+                Text("延迟").font(.footnote).foregroundColor(.white.opacity(0.8))
                 TextField("0", text: $model.latencyText)
                     .font(.system(.footnote, design: .monospaced))
                     .keyboardType(.numberPad)
@@ -208,7 +209,7 @@ struct ContentView: View {
                     .padding(.horizontal, 8).padding(.vertical, 6)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.6)))
                     .disabled(model.isStreaming)
-                Text("ms (0=默认)").font(.footnote).foregroundColor(.white.opacity(0.6))
+                Text("毫秒（0=默认）").font(.footnote).foregroundColor(.white.opacity(0.6))
                 Spacer()
             }
         }
@@ -219,7 +220,6 @@ struct ContentView: View {
     private var bottomRow: some View {
         HStack {
             RoundIconButton(icon: "gearshape.fill") { showSettings = true }
-                .disabled(model.isStreaming)
             Spacer()
             Button(action: model.toggle) {
                 ZStack {
@@ -320,11 +320,12 @@ struct SettingsSheet: View {
         NavigationView {
             Form {
                 Section(header: Text("视频"),
-                        footer: Text("2K 用 4K 采集再缩放到 2560×1440。60fps 需要设备支持对应分辨率；不支持时会自动保持 30fps。")) {
+                        footer: Text(model.isStreaming ? "推流中不可修改分辨率、帧率和画面比例，停止推流后可修改。" : "超清2K 用 4K 采集再缩放到 2560×1440。60帧/秒需要设备支持对应分辨率；不支持时会自动保持 30帧/秒。")) {
                     Picker("画面比例", selection: $model.aspect) {
                         ForEach(AspectOption.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    .disabled(model.isStreaming)
                     Picker("分辨率", selection: $model.resolution) {
                         ForEach(ResolutionOption.allCases) { Text($0.label).tag($0) }
                     }
@@ -333,40 +334,52 @@ struct SettingsSheet: View {
                         model.applyResolution()
                         kbps = Double(model.bitrateKbps)
                     }
+                    .disabled(model.isStreaming)
+                    if model.isStreaming {
+                        Text("推流中不可修改分辨率").font(.footnote).foregroundColor(.secondary)
+                    }
                     Picker("帧率", selection: $model.fps) {
-                        Text("30 fps").tag(30)
-                        Text("60 fps").tag(60)
+                        Text("30帧/秒").tag(30)
+                        Text("60帧/秒").tag(60)
                     }
                     .pickerStyle(.segmented)
                     .onChange(of: model.fps) { _ in model.applyFrameRate() }
+                    .disabled(model.isStreaming)
                 }
-                .disabled(model.isStreaming)
 
-                Section(header: Text("码率"), footer: Text("码率跟随分辨率：720p 4M / 1080p 6M / 2K 10M。")) {
+                Section(header: Text("画质模式"), footer: Text("流畅：使用设定码率的 60%，优先保证不卡顿；高质量：使用设定码率；自动：根据网络丢包和发送缓冲自动在设定码率的 40%～100% 之间调节。推流中可随时切换。")) {
+                    Picker("画质模式", selection: $model.qualityMode) {
+                        ForEach(QualityMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    if model.isStreaming {
+                        Text("当前实际码率：\(Self.fmt(model.currentKbps)) 千比特/秒").font(.footnote).foregroundColor(.secondary)
+                    }
+                }
+                Section(header: Text("码率"), footer: Text("默认码率跟随分辨率：标清720 4兆 / 高清1080 6兆 / 超清2K 10兆。推流中可实时调整。")) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("视频码率：\(Self.fmt(Int(kbps))) kbps (" + String(format: "%.1f", kbps / 1000) + " Mbps)")
+                        Text("视频码率：\(Self.fmt(Int(kbps))) 千比特/秒（" + String(format: "%.1f", kbps / 1000) + " 兆比特/秒）")
                         Slider(value: $kbps, in: 1000...12000, step: 100, onEditingChanged: { editing in
                             if !editing { model.bitrateKbps = Int(kbps) }
                         })
                         .accentColor(.red)
                         .onChange(of: kbps) { v in model.bitrateKbps = Int(v) }
                     }
-                    Button("恢复默认（\(model.resolution.rawValue) \(model.resolution.defaultKbps / 1000)M）") {
+                    Button("恢复默认（\(model.resolution.cn) \(model.resolution.defaultKbps / 1000)兆）") {
                         model.resetBitrate()
                         kbps = Double(model.bitrateKbps)
                     }
                 }
-                .disabled(model.isStreaming)
 
                 Section(header: Text("镜头 / 变焦"),
                         footer: Text("多镜头模式下变焦会自动切换超广角 / 广角 / 长焦。部分机型在多镜头模式下不支持手动对焦，需要时可关闭多镜头。")) {
-                    Toggle("多镜头自动切换（支持 0.5x 超广角）", isOn: $model.multiCam)
+                    Toggle("多镜头自动切换（支持 0.5倍超广角）", isOn: $model.multiCam)
                         .toggleStyle(SwitchToggleStyle(tint: .green))
                     HStack(spacing: 10) {
                         ForEach(zoomPresets, id: \.self) { z in
                             let unsupported = z < 1 && !model.hasUltraWide
                             Button(action: { if model.setZoom(CGFloat(z)) { sliderZoom = z } }) {
-                                Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
+                                Text(z == 0.5 ? "0.5倍" : "\(Int(z))倍")
                                     .font(.footnote.weight(.bold))
                                     .foregroundColor(unsupported ? .gray :
                                         (abs(Double(model.zoom) - z) < 0.01 ? .yellow : .primary))
@@ -408,14 +421,14 @@ struct SettingsSheet: View {
                     }
                     Toggle("断流自动重连", isOn: $model.autoReconnect)
                         .disabled(model.isStreaming)
-                    Toggle("启动 App 后自动开始推流", isOn: $model.autoStartOnLaunch)
+                    Toggle("启动应用后自动开始推流", isOn: $model.autoStartOnLaunch)
                         .disabled(model.isStreaming)
                     Toggle("自动推流后自动锁屏", isOn: $model.autoLockAfterStart)
                         .disabled(model.isStreaming)
                 }
-                Section(header: Text("H.264")) {
-                    Picker("Profile", selection: $model.profile) {
-                        ForEach(ProfileOption.allCases) { Text($0.rawValue).tag($0) }
+                Section(header: Text("编码格式"), footer: Text("推流中不可修改编码格式。")) {
+                    Picker("编码档次", selection: $model.profile) {
+                        ForEach(ProfileOption.allCases) { Text($0.cn).tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }
@@ -450,8 +463,8 @@ struct SettingsSheet: View {
     }
 
     static func zoomText(_ z: CGFloat) -> String {
-        if abs(z - z.rounded()) < 0.05 && z >= 1 { return "\(Int(z.rounded()))x" }
-        return String(format: "%.1fx", Double(z))
+        if abs(z - z.rounded()) < 0.05 && z >= 1 { return "\(Int(z.rounded()))倍" }
+        return String(format: "%.1f倍", Double(z))
     }
 }
 

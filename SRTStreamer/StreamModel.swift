@@ -22,9 +22,16 @@ enum ResolutionOption: String, CaseIterable, Identifiable {
     }
     var label: String {
         switch self {
-        case .p720: return "720p (1280×720)"
-        case .p1080: return "1080p (1920×1080)"
-        case .k2: return "2K (2560×1440)"
+        case .p720: return "标清720（1280×720）"
+        case .p1080: return "高清1080（1920×1080）"
+        case .k2: return "超清2K（2560×1440）"
+        }
+    }
+    var cn: String {
+        switch self {
+        case .p720: return "标清720"
+        case .p1080: return "高清1080"
+        case .k2: return "超清2K"
         }
     }
     var preset: AVCaptureSession.Preset {
@@ -64,10 +71,18 @@ enum AspectOption: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum QualityMode: String, CaseIterable, Identifiable {
+    case smooth = "流畅"
+    case high = "高质量"
+    case auto = "自动"
+    var id: String { rawValue }
+}
+
 enum ProfileOption: String, CaseIterable, Identifiable {
     case baseline = "Baseline"
     case main = "Main"
     var id: String { rawValue }
+    var cn: String { self == .baseline ? "基础（兼容性好）" : "主要（画质更好）" }
     var profileLevel: String {
         self == .baseline ? (kVTProfileLevel_H264_Baseline_AutoLevel as String) : (kVTProfileLevel_H264_Main_AutoLevel as String)
     }
@@ -83,7 +98,59 @@ final class StreamModel: ObservableObject {
         didSet { UserDefaults.standard.set(resolution.rawValue, forKey: "resolution") }
     }
     @Published var bitrateKbps: Int = (UserDefaults.standard.object(forKey: "bitrateKbps") as? Int) ?? 6000 {
-        didSet { UserDefaults.standard.set(bitrateKbps, forKey: "bitrateKbps") }
+        didSet { UserDefaults.standard.set(bitrateKbps, forKey: "bitrateKbps"); retarget() }
+    }
+    /// 画质模式：流畅 = 手动码率的 60%；高质量 = 手动码率；自动 = 按网络在 [40%, 手动码率] 之间自适应
+    @Published var qualityMode: QualityMode = QualityMode(rawValue: UserDefaults.standard.string(forKey: "qualityMode") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(qualityMode.rawValue, forKey: "qualityMode"); retarget() }
+    }
+    /// 当前实际编码码率
+    @Published var currentKbps: Int = 0
+    private var goodSeconds = 0
+    private var lastLoss: Int32 = 0
+    private var lastDrop: Int32 = 0
+    var minAutoKbps: Int { max(800, bitrateKbps * 4 / 10) }
+    private var baseTargetKbps: Int {
+        switch qualityMode {
+        case .smooth: return max(800, bitrateKbps * 6 / 10)
+        case .high, .auto: return bitrateKbps
+        }
+    }
+    private func retarget() {
+        let t = baseTargetKbps
+        if qualityMode == .auto && isStreaming && currentKbps > 0 {
+            currentKbps = min(max(currentKbps, minAutoKbps), t)
+        } else {
+            currentKbps = t
+        }
+        Task { await applyLiveBitrate() }
+    }
+    private var appliedKbps = 0
+    private func applyLiveBitrate() async {
+        guard let stream, currentKbps > 0, currentKbps != appliedKbps else { return }
+        var v = await stream.videoSettings
+        v.bitRate = currentKbps * 1000
+        await stream.setVideoSettings(v)
+        appliedKbps = currentKbps
+    }
+    /// 自动模式：根据丢包/丢帧/发送缓冲调整码率
+    private func adapt(_ p: SRTPerformanceData) async {
+        let loss = p.pktSndLossTotal, drop = p.pktSndDropTotal
+        let dLoss = loss - lastLoss, dDrop = drop - lastDrop
+        lastLoss = loss; lastDrop = drop
+        guard qualityMode == .auto else { return }
+        let congested = dDrop > 0 || dLoss > 30 || p.msSndBuf > 800
+        if congested {
+            goodSeconds = 0
+            currentKbps = max(minAutoKbps, currentKbps * 3 / 4)
+        } else {
+            goodSeconds += 1
+            if goodSeconds >= 8 && currentKbps < baseTargetKbps {
+                goodSeconds = 0
+                currentKbps = min(baseTargetKbps, currentKbps * 11 / 10 + 100)
+            }
+        }
+        await applyLiveBitrate()
     }
     @Published var aspect: AspectOption = AspectOption(rawValue: UserDefaults.standard.string(forKey: "aspect") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(aspect.rawValue, forKey: "aspect"); applyOrientation() }
@@ -178,7 +245,14 @@ final class StreamModel: ObservableObject {
             }
         }
         try? builtIn.setPreferredDataSource(ds)
-        micInfo = "\(ds.dataSourceName) · \(pattern)"
+        let side: String
+        switch ds.orientation {
+        case .some(.front): side = "前置麦克风"
+        case .some(.back): side = "后置麦克风"
+        case .some(.bottom): side = "底部麦克风"
+        default: side = "内置麦克风"
+        }
+        micInfo = "\(side) · \(pattern)"
     }
 
     @Published var reconnectAttempt = 0
@@ -284,7 +358,7 @@ final class StreamModel: ObservableObject {
             if isStreaming || isReconnecting { return }
             if !canAutoStart {
                 if urlText.contains("密钥") { status = "请把地址里的“密钥”替换成你的推流密钥" }
-                else { status = "SRT 地址格式错误" }
+                else { status = "推流地址格式错误" }
                 isLocked = false
                 return
             }
@@ -593,7 +667,7 @@ final class StreamModel: ObservableObject {
 
     private func start() async {
         guard !isBusy else { return }
-        guard let url = normalizedURL() else { status = "SRT 地址格式错误"; return }
+        guard let url = normalizedURL() else { status = "推流地址格式错误"; return }
         if urlText.contains("密钥") { status = "请把地址里的“密钥”替换成你的推流密钥"; return }
         isBusy = true
         defer { isBusy = false }
@@ -608,7 +682,7 @@ final class StreamModel: ObservableObject {
         // 1. 编码参数必须在 publish 前设置
         var v = VideoCodecSettings(
             videoSize: outputSize,
-            bitRate: bitrateKbps * 1000,
+            bitRate: baseTargetKbps * 1000,
             profileLevel: profile.profileLevel,
             scalingMode: .trim,
             bitRateMode: .average,
@@ -617,6 +691,8 @@ final class StreamModel: ObservableObject {
         )
         v.frameInterval = 0
         await stream.setVideoSettings(v)
+        currentKbps = baseTargetKbps; appliedKbps = currentKbps
+        goodSeconds = 0; lastLoss = 0; lastDrop = 0
         var a = await stream.audioSettings
         a.bitRate = 128 * 1000
         await stream.setAudioSettings(a)
@@ -710,6 +786,7 @@ final class StreamModel: ObservableObject {
         if let p = await connection.performanceData {
             sendMbps = p.mbpsSendRate
             sentKB = p.byteSentTotal / 1024
+            if isStreaming { await adapt(p) }
         }
         if !(await connection.connected) && isStreaming {
             status = "连接已断开"

@@ -13,7 +13,7 @@ struct LockOverlay: View {
 
     private var statusLine: String {
         if let e = model.cameraError { return "错误 · \(e)" }
-        if model.isStreaming { return String(format: "推流中 · %.2f Mbps", model.sendMbps) }
+        if model.isStreaming { return String(format: "推流中 · %.2f 兆比特/秒", model.sendMbps) }
         return model.status
     }
 

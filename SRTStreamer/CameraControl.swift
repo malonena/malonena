@@ -150,21 +150,21 @@ struct CameraPanel: View {
             Picker("曝光", selection: $cam.manualExposure) { Text("自动曝光").tag(false); Text("手动曝光").tag(true) }
                 .pickerStyle(.segmented)
             if cam.manualExposure {
-                row("ISO \(Int(cam.iso))") {
+                row("感光度 \(Int(cam.iso))") {
                     Slider(value: $cam.iso, in: cam.minISO...cam.maxISO).onChange(of: cam.iso) { _ in cam.applyExposure() }
                 }
                 row("快门 1/\(Int(cam.shutterDenom))") {
                     Slider(value: $cam.shutterDenom, in: cam.minShutter...cam.maxShutter).onChange(of: cam.shutterDenom) { _ in cam.applyExposure() }
                 }
             } else {
-                row(String(format: "EV %+.1f", cam.ev)) {
+                row(String(format: "曝光补偿 %+.1f", cam.ev)) {
                     Slider(value: $cam.ev, in: cam.minEV...max(cam.maxEV, cam.minEV + 0.1)).onChange(of: cam.ev) { _ in cam.applyExposure() }
                 }
             }
             Picker("白平衡", selection: $cam.wbLocked) { Text("白平衡自动").tag(false); Text("白平衡锁定").tag(true) }
                 .pickerStyle(.segmented)
             if cam.wbLocked {
-                row("\(Int(cam.temperature))K") {
+                row("色温 \(Int(cam.temperature))开") {
                     Slider(value: $cam.temperature, in: 2500...8000).onChange(of: cam.temperature) { _ in cam.applyWB() }
                 }
             }
