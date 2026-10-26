@@ -19,15 +19,15 @@ final class CameraControl: ObservableObject {
     var device: AVCaptureDevice? { didSet { refreshRanges() } }
     var position: AVCaptureDevice.Position = .back
 
-    @Published var manualExposure = false { didSet { applyExposure() } }
-    @Published var iso: Float = 100
-    @Published var shutterDenom: Double = 60 // 1/x 秒
-    @Published var ev: Float = 0
-    @Published var wbLocked = false { didSet { applyWB() } }
-    @Published var temperature: Float = 5000
-    @Published var manualFocus = false { didSet { applyFocus() } }
-    @Published var lensPosition: Float = 0.5
-    @Published var torch = false { didSet { applyTorch() } }
+    @Published var manualExposure = UserDefaults.standard.bool(forKey: "cam.manualExposure") { didSet { UserDefaults.standard.set(manualExposure, forKey: "cam.manualExposure"); applyExposure() } }
+    @Published var iso: Float = (UserDefaults.standard.object(forKey: "cam.iso") as? Float) ?? 100 { didSet { UserDefaults.standard.set(iso, forKey: "cam.iso") } }
+    @Published var shutterDenom: Double = (UserDefaults.standard.object(forKey: "cam.shutter") as? Double) ?? 60 { didSet { UserDefaults.standard.set(shutterDenom, forKey: "cam.shutter") } } // 1/x 秒
+    @Published var ev: Float = (UserDefaults.standard.object(forKey: "cam.ev") as? Float) ?? 0 { didSet { UserDefaults.standard.set(ev, forKey: "cam.ev") } }
+    @Published var wbLocked = UserDefaults.standard.bool(forKey: "cam.wbLocked") { didSet { UserDefaults.standard.set(wbLocked, forKey: "cam.wbLocked"); applyWB() } }
+    @Published var temperature: Float = (UserDefaults.standard.object(forKey: "cam.temp") as? Float) ?? 5000 { didSet { UserDefaults.standard.set(temperature, forKey: "cam.temp") } }
+    @Published var manualFocus = UserDefaults.standard.bool(forKey: "cam.manualFocus") { didSet { UserDefaults.standard.set(manualFocus, forKey: "cam.manualFocus"); applyFocus() } }
+    @Published var lensPosition: Float = (UserDefaults.standard.object(forKey: "cam.lens") as? Float) ?? 0.5 { didSet { UserDefaults.standard.set(lensPosition, forKey: "cam.lens") } }
+    @Published var torch = UserDefaults.standard.bool(forKey: "cam.torch") { didSet { UserDefaults.standard.set(torch, forKey: "cam.torch"); applyTorch() } }
     @Published var stabilization: StabilizationOption = StabilizationOption(rawValue: UserDefaults.standard.string(forKey: "stab") ?? "") ?? .off {
         didSet { UserDefaults.standard.set(stabilization.rawValue, forKey: "stab") }
     }
@@ -39,6 +39,15 @@ final class CameraControl: ObservableObject {
     @Published var minEV: Float = -2
     @Published var maxEV: Float = 2
     @Published var hasTorch = false
+
+    func save() {
+        let d = UserDefaults.standard
+        d.set(manualExposure, forKey: "cam.manualExposure"); d.set(iso, forKey: "cam.iso")
+        d.set(shutterDenom, forKey: "cam.shutter"); d.set(ev, forKey: "cam.ev")
+        d.set(wbLocked, forKey: "cam.wbLocked"); d.set(temperature, forKey: "cam.temp")
+        d.set(manualFocus, forKey: "cam.manualFocus"); d.set(lensPosition, forKey: "cam.lens")
+        d.set(torch, forKey: "cam.torch"); d.set(stabilization.rawValue, forKey: "stab")
+    }
 
     private func refreshRanges() {
         guard let d = device else { return }

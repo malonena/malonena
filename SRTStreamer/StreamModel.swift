@@ -102,7 +102,9 @@ final class StreamModel: ObservableObject {
         didSet { UserDefaults.standard.set(fps, forKey: "fps") }
     }
     /// 用户视角的变焦倍数（0.5 = 超广角）
-    @Published var zoom: CGFloat = 1
+    @Published var zoom: CGFloat = 1 {
+        didSet { UserDefaults.standard.set(Double(zoom), forKey: "zoom") }
+    }
     @Published var hasUltraWide = false
     private var currentDevice: AVCaptureDevice?
     private var zoomScale: CGFloat = 1 // 用户倍数 → videoZoomFactor 的系数
@@ -220,7 +222,9 @@ final class StreamModel: ObservableObject {
     private var connection: SRTConnection?
     private var stream: SRTStream?
     private let counter = FrameCounter()
-    private var position: AVCaptureDevice.Position = .back
+    private var position: AVCaptureDevice.Position = (UserDefaults.standard.string(forKey: "cameraPosition") == "front") ? .front : .back {
+        didSet { UserDefaults.standard.set(position == .front ? "front" : "back", forKey: "cameraPosition") }
+    }
     private var statsTimer: Timer?
     private var started = false
 
@@ -237,7 +241,9 @@ final class StreamModel: ObservableObject {
         await mixer.setSessionPreset(resolution.preset)
         startMotion()
         await mixer.setVideoOrientation(captureOrientation)
+        let savedZoom = CGFloat((UserDefaults.standard.object(forKey: "zoom") as? Double) ?? 1)
         await attachCamera()
+        setZoom(max(savedZoom, minZoom))
         if audioOK {
             do { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
             catch { status = "麦克风连接失败: \(error.localizedDescription)" }
@@ -564,6 +570,12 @@ final class StreamModel: ObservableObject {
     }
 
     /// 回到前台：若推流中断则自动重启
+    func saveAll() {
+        camera.save()
+        UserDefaults.standard.set(Double(zoom), forKey: "zoom")
+        UserDefaults.standard.synchronize()
+    }
+
     func onForeground() {
         configureAudioSession()
         Task {

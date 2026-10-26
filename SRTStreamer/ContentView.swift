@@ -85,7 +85,9 @@ struct ContentView: View {
         .environment(\.uiAngle, model.uiAngle)
         .animation(.easeInOut(duration: 0.3), value: model.uiAngle)
         .onChange(of: model.isStreaming) { s in if !s { model.syncOrientation() } }
-        .onChange(of: scenePhase) { ph in if ph == .active { model.onForeground() } }
+        .onChange(of: scenePhase) { ph in
+            if ph == .active { model.onForeground() } else { model.saveAll() }
+        }
         .onChange(of: model.zoom) { z in
             if abs(sliderZoom - Double(z)) > 0.001 { sliderZoom = Double(z) }
         }
