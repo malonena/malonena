@@ -193,7 +193,22 @@ struct ContentView: View {
 
     private var inputPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("srt://host:port?streamid=...", text: $model.urlText)
+            HStack(spacing: 8) {
+                Text("推流地址").font(.footnote).foregroundColor(.white.opacity(0.8)).lineLimit(1).fixedSize().frame(width: 56, alignment: .leading)
+                TextField("推流地址", text: $model.addressText)
+                    .font(.system(.footnote, design: .monospaced))
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .keyboardType(.URL)
+                    .lineLimit(1)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6)))
+                    .disabled(model.isStreaming)
+            }
+            HStack(spacing: 8) {
+                Text("密钥").font(.footnote).foregroundColor(.white.opacity(0.8)).frame(width: 56, alignment: .leading)
+                TextField("输入推流密钥", text: $model.keyText)
                 .font(.system(.footnote, design: .monospaced))
                 .autocapitalization(.none)
                 .disableAutocorrection(true)
@@ -203,6 +218,7 @@ struct ContentView: View {
                 .padding(.horizontal, 10).padding(.vertical, 8)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6)))
                 .disabled(model.isStreaming)
+            }
             HStack(spacing: 8) {
                 Text("延迟").font(.footnote).foregroundColor(.white.opacity(0.8))
                 TextField("0", text: $model.latencyText)

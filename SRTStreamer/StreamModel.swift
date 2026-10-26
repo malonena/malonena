@@ -93,7 +93,60 @@ enum ProfileOption: String, CaseIterable, Identifiable {
 final class StreamModel: ObservableObject {
     static let defaultURL = "srt://8.148.79.198:8890?streamid=publish:live:push:密钥"
 
-    @AppStorage("srtURL") var urlText: String = StreamModel.defaultURL
+    static let defaultAddress = "srt://8.148.79.198:8890"
+    static let keyPrefix = "publish:live:push:"
+    /// 推流地址（不含密钥）
+    @Published var addressText: String = StreamModel.loadAddress() {
+        didSet {
+            if let (addr, key) = StreamModel.splitURL(addressText) {
+                addressText = addr
+                if let key, !key.isEmpty { keyText = key }
+                UserDefaults.standard.set(addr, forKey: "srtAddress")
+                return
+            }
+            UserDefaults.standard.set(addressText, forKey: "srtAddress")
+        }
+    }
+    /// 推流密钥
+    @Published var keyText: String = UserDefaults.standard.string(forKey: "srtKey") ?? "" {
+        didSet { UserDefaults.standard.set(keyText, forKey: "srtKey") }
+    }
+    /// 最终推流地址
+    var urlText: String {
+        var a = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
+        while a.hasSuffix("/") || a.hasSuffix("?") { a.removeLast() }
+        let k = keyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return a + "?streamid=" + StreamModel.keyPrefix + (k.isEmpty ? "密钥" : k)
+    }
+    /// 若粘贴的是带 streamid 的完整地址，拆出 (地址, 密钥)
+    static func splitURL(_ s: String) -> (String, String?)? {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let q = t.firstIndex(of: "?") else { return nil }
+        let addr = String(t[..<q])
+        let query = String(t[t.index(after: q)...])
+        var key: String?
+        for part in query.split(separator: "&") {
+            let kv = part.split(separator: "=", maxSplits: 1).map(String.init)
+            if kv.count == 2 && kv[0] == "streamid" {
+                var v = kv[1].removingPercentEncoding ?? kv[1]
+                if v.hasPrefix(keyPrefix) { v = String(v.dropFirst(keyPrefix.count)) }
+                else if let i = v.lastIndex(of: ":") { v = String(v[v.index(after: i)...]) }
+                key = (v == "密钥") ? nil : v
+            }
+        }
+        return (addr, key)
+    }
+    static func loadAddress() -> String {
+        let d = UserDefaults.standard
+        if let a = d.string(forKey: "srtAddress") { return a }
+        // 迁移旧的完整地址
+        if let old = d.string(forKey: "srtURL"), let (addr, key) = splitURL(old) {
+            d.set(addr, forKey: "srtAddress")
+            if let key, !key.isEmpty, d.string(forKey: "srtKey") == nil { d.set(key, forKey: "srtKey") }
+            return addr.isEmpty ? defaultAddress : addr
+        }
+        return defaultAddress
+    }
     @AppStorage("latency") var latencyText: String = "200"
     @Published var resolution: ResolutionOption = ResolutionOption(rawValue: UserDefaults.standard.string(forKey: "resolution") ?? "") ?? .p720 {
         didSet { UserDefaults.standard.set(resolution.rawValue, forKey: "resolution") }
@@ -404,7 +457,7 @@ final class StreamModel: ObservableObject {
             isLocked = true
             if isStreaming || isReconnecting { return }
             if !canAutoStart {
-                if urlText.contains("密钥") { status = "请把地址里的“密钥”替换成你的推流密钥" }
+                if urlText.contains("密钥") { status = "请输入推流密钥" }
                 else { status = "推流地址格式错误" }
                 isLocked = false
                 return
@@ -832,7 +885,7 @@ final class StreamModel: ObservableObject {
     private func start() async {
         guard !isBusy else { return }
         guard let url = normalizedURL() else { status = "推流地址格式错误"; return }
-        if urlText.contains("密钥") { status = "请把地址里的“密钥”替换成你的推流密钥"; return }
+        if urlText.contains("密钥") { status = "请输入推流密钥"; return }
         isBusy = true
         defer { isBusy = false }
 
