@@ -4,6 +4,7 @@ struct ContentView: View {
     @StateObject private var model = StreamModel()
     @State private var showSettings = false
     @State private var sliderZoom: Double = 1
+    @State private var isLocked = false
 
     private var hasError: Bool {
         model.cameraError != nil || ["失败", "错误", "断开", "无法", "没有", "请把", "未收到"].contains { model.status.contains($0) }
@@ -43,6 +44,11 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 12)
+            .opacity(isLocked ? 0 : 1)
+            if isLocked {
+                LockOverlay(model: model, isLocked: $isLocked)
+                    .zIndex(10)
+            }
         }
         .preferredColorScheme(.dark)
         .statusBar(hidden: true)
@@ -84,6 +90,9 @@ struct ContentView: View {
                 }
                 .disabled(model.isStreaming)
                 .opacity(model.isStreaming ? 0.5 : 1)
+                CapsuleButton(icon: "lock.fill", title: "锁屏") {
+                    isLocked = true
+                }
             }
         }
     }
