@@ -72,6 +72,16 @@ enum AspectOption: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum StreamLine: String, CaseIterable, Identifiable {
+    case one = "线路一"
+    case two = "线路二"
+    var id: String { rawValue }
+    var path: String { self == .one ? "live" : "live2" }
+    var user: String { self == .one ? "push" : "push2" }
+    var prefix: String { "publish:\(path):\(user):" }
+    var keyStore: String { self == .one ? "srtKey" : "srtKey2" }
+}
+
 enum QualityMode: String, CaseIterable, Identifiable {
     case smooth = "流畅"
     case high = "高质量"
@@ -98,8 +108,9 @@ final class StreamModel: ObservableObject {
     /// 推流地址（不含密钥）
     @Published var addressText: String = StreamModel.loadAddress() {
         didSet {
-            if let (addr, key) = StreamModel.splitURL(addressText) {
+            if let (addr, key, ln) = StreamModel.splitURL(addressText) {
                 addressText = addr
+                if let ln, ln != line { line = ln }
                 if let key, !key.isEmpty { keyText = key }
                 UserDefaults.standard.set(addr, forKey: "srtAddress")
                 return
@@ -108,39 +119,51 @@ final class StreamModel: ObservableObject {
         }
     }
     /// 推流密钥
-    @Published var keyText: String = UserDefaults.standard.string(forKey: "srtKey") ?? "" {
-        didSet { UserDefaults.standard.set(keyText, forKey: "srtKey") }
+    @Published var keyText: String = UserDefaults.standard.string(forKey: StreamModel.savedLine.keyStore) ?? "" {
+        didSet { UserDefaults.standard.set(keyText, forKey: line.keyStore) }
+    }
+    static var savedLine: StreamLine { StreamLine(rawValue: UserDefaults.standard.string(forKey: "streamLine") ?? "") ?? .one }
+    /// 线路（每条线路单独保存密钥）
+    @Published var line: StreamLine = StreamModel.savedLine {
+        didSet {
+            UserDefaults.standard.set(line.rawValue, forKey: "streamLine")
+            keyText = UserDefaults.standard.string(forKey: line.keyStore) ?? ""
+        }
     }
     /// 最终推流地址
     var urlText: String {
         var a = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
         while a.hasSuffix("/") || a.hasSuffix("?") { a.removeLast() }
         let k = keyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return a + "?streamid=" + StreamModel.keyPrefix + (k.isEmpty ? "密钥" : k)
+        return a + "?streamid=" + line.prefix + (k.isEmpty ? "密钥" : k)
     }
     /// 若粘贴的是带 streamid 的完整地址，拆出 (地址, 密钥)
-    static func splitURL(_ s: String) -> (String, String?)? {
+    static func splitURL(_ s: String) -> (String, String?, StreamLine?)? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let q = t.firstIndex(of: "?") else { return nil }
         let addr = String(t[..<q])
         let query = String(t[t.index(after: q)...])
         var key: String?
+        var ln: StreamLine?
         for part in query.split(separator: "&") {
             let kv = part.split(separator: "=", maxSplits: 1).map(String.init)
             if kv.count == 2 && kv[0] == "streamid" {
                 var v = kv[1].removingPercentEncoding ?? kv[1]
-                if v.hasPrefix(keyPrefix) { v = String(v.dropFirst(keyPrefix.count)) }
-                else if let i = v.lastIndex(of: ":") { v = String(v[v.index(after: i)...]) }
+                let parts = v.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+                if parts.count >= 4 {
+                    ln = StreamLine.allCases.first { $0.path == parts[1] && $0.user == parts[2] }
+                    v = parts[3...].joined(separator: ":")
+                } else if let i = v.lastIndex(of: ":") { v = String(v[v.index(after: i)...]) }
                 key = (v == "密钥") ? nil : v
             }
         }
-        return (addr, key)
+        return (addr, key, ln)
     }
     static func loadAddress() -> String {
         let d = UserDefaults.standard
         if let a = d.string(forKey: "srtAddress") { return a }
         // 迁移旧的完整地址
-        if let old = d.string(forKey: "srtURL"), let (addr, key) = splitURL(old) {
+        if let old = d.string(forKey: "srtURL"), let (addr, key, _) = splitURL(old) {
             d.set(addr, forKey: "srtAddress")
             if let key, !key.isEmpty, d.string(forKey: "srtKey") == nil { d.set(key, forKey: "srtKey") }
             return addr.isEmpty ? defaultAddress : addr

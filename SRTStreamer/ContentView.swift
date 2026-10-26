@@ -194,6 +194,14 @@ struct ContentView: View {
     private var inputPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
+                Text("线路").font(.footnote).foregroundColor(.white.opacity(0.8)).frame(width: 56, alignment: .leading)
+                Picker("线路", selection: $model.line) {
+                    ForEach(StreamLine.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(model.isStreaming)
+            }
+            HStack(spacing: 8) {
                 Text("推流地址").font(.footnote).foregroundColor(.white.opacity(0.8)).lineLimit(1).fixedSize().frame(width: 56, alignment: .leading)
                 TextField("推流地址", text: $model.addressText)
                     .font(.system(.footnote, design: .monospaced))
@@ -208,7 +216,7 @@ struct ContentView: View {
             }
             HStack(spacing: 8) {
                 Text("密钥").font(.footnote).foregroundColor(.white.opacity(0.8)).frame(width: 56, alignment: .leading)
-                TextField("输入推流密钥", text: $model.keyText)
+                TextField("输入\(model.line.rawValue)推流密钥", text: $model.keyText)
                 .font(.system(.footnote, design: .monospaced))
                 .autocapitalization(.none)
                 .disableAutocorrection(true)
