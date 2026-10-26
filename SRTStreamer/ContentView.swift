@@ -62,7 +62,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
-            .padding(.bottom, 12)
+            .padding(.bottom, 0)
             .opacity(model.isLocked ? 0 : 1)
             if model.isLocked {
                 LockOverlay(model: model, isLocked: $model.isLocked)
@@ -111,12 +111,6 @@ struct ContentView: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.5)))
 
             HStack(spacing: 12) {
-                IconCircleButton(icon: "rotate.right") {
-                    let all = AspectOption.allCases
-                    model.aspect = all[((all.firstIndex(of: model.aspect) ?? 0) + 1) % all.count]
-                }
-                .disabled(model.isStreaming)
-                .opacity(model.isStreaming ? 0.5 : 1)
                 IconCircleButton(icon: "rectangle.on.rectangle") {
                     let all = ResolutionOption.allCases
                     model.resolution = all[((all.firstIndex(of: model.resolution) ?? 0) + 1) % all.count]
@@ -129,7 +123,7 @@ struct ContentView: View {
                     model.toggleMic()
                 }
                 IconCircleButton(icon: "slider.horizontal.3", tint: showCamPanel ? .yellow : .white) {
-                    withAnimation { showCamPanel.toggle() }
+                    showCamPanel.toggle()
                 }
             }
             if model.orientationLockedHint {
@@ -156,37 +150,6 @@ struct ContentView: View {
     private var zoomControls: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                ForEach(zoomPresets, id: \.self) { z in
-                    let unsupported = z < 1 && !model.hasUltraWide
-                    Button(action: {
-                        if !model.setZoom(CGFloat(z)) {
-                            showToast("前置镜头不支持 0.5x")
-                        }
-                    }) {
-                        Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
-                            .font(.footnote.weight(.bold))
-                            .foregroundColor(unsupported ? .white.opacity(0.35) :
-                                (abs(Double(model.zoom) - z) < 0.01 ? .yellow : .white))
-                            .lineLimit(1)
-                            .fixedSize()
-                            .rotationEffect(.degrees(model.uiAngle))
-                            .frame(maxWidth: .infinity, minHeight: 40)
-                            .background(Capsule().fill(Color.black.opacity(unsupported ? 0.3 : 0.55)))
-                    }
-                }
-                Button(action: { model.oneTapLockStream() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "lock.fill")
-                        Text("锁屏").lineLimit(1).fixedSize()
-                    }
-                    .font(.footnote.weight(.bold))
-                    .foregroundColor(.white)
-                    .rotationEffect(.degrees(model.uiAngle))
-                    .frame(maxWidth: .infinity, minHeight: 40)
-                    .background(Capsule().fill(Color.red.opacity(0.6)))
-                }
-            }
-            HStack(spacing: 10) {
                 Text(zoomLabel(model.zoom))
                     .font(.footnote.monospacedDigit().weight(.semibold))
                     .foregroundColor(.yellow)
@@ -197,6 +160,9 @@ struct ContentView: View {
                 .accentColor(.yellow)
                 .onChange(of: sliderZoom) { v in
                     model.setZoom(CGFloat(v))
+                }
+                IconCircleButton(icon: "lock.fill", bg: Color.red.opacity(0.6)) {
+                    model.oneTapLockStream()
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
@@ -295,16 +261,28 @@ struct IconCircleButton: View {
     @Environment(\.uiAngle) private var angle
     let icon: String
     var tint: Color = .white
+    var bg: Color = Color.black.opacity(0.55)
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .rotationEffect(.degrees(angle))
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundColor(tint)
-                .frame(width: 44, height: 44)
-                .background(Circle().fill(Color.black.opacity(0.55)))
+            ZStack {
+                RoundedRectangle(cornerRadius: 10).fill(bg)
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(tint)
+                    .rotationEffect(.degrees(angle))
+            }
+            .frame(width: 48, height: 48)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
+        .buttonStyle(FixedButtonStyle())
+        .frame(width: 48, height: 48)
+    }
+}
+
+struct FixedButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.7 : 1)
     }
 }
 
