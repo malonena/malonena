@@ -605,16 +605,17 @@ final class StreamModel: ObservableObject {
             cameraError = "找不到摄像头设备"
             return
         }
-        let stab = camera.stabilization.mode
         do {
             try await mixer.attachVideo(device, track: 0) { unit in
                 unit.isVideoMirrored = (pos == .front)
-                unit.preferredVideoStabilizationMode = stab
+                // 挂载时先关闭防抖（此时 unit 可能仍指向旧设备/旧连接），挂载完成后再按新格式安全设置
+                unit.preferredVideoStabilizationMode = .off
             }
             cameraError = nil
             applyZoomFactor()
             await applyFrameRateNow()
             camera.reapply()
+            applyStabilizationSafely(silent: true)
         } catch {
             cameraError = "摄像头连接失败: \(error.localizedDescription)"
         }
@@ -675,6 +676,7 @@ final class StreamModel: ObservableObject {
         let target = (fps == 60 && supports60()) ? 60 : 30
         effectiveFps = target
         await mixer.setFrameRate(Float64(target))
+        applyStabilizationSafely(silent: true) // 格式可能已变，重新按支持情况设置防抖
     }
 
     func applyFrameRate() {
@@ -733,10 +735,35 @@ final class StreamModel: ObservableObject {
         }
     }
 
+    /// 当前格式不支持的防抖模式直接赋值会抛 NSInvalidArgumentException 导致闪退，这里按 电影级→标准→关 降级
+    static func safeStabMode(_ device: AVCaptureDevice?, _ want: AVCaptureVideoStabilizationMode) -> AVCaptureVideoStabilizationMode {
+        guard let f = device?.activeFormat else { return .off }
+        let chain: [AVCaptureVideoStabilizationMode]
+        switch want {
+        case .off: return .off
+        case .auto: chain = [.auto, .standard]
+        case .cinematic: chain = [.cinematic, .standard]
+        default: chain = [want, .standard]
+        }
+        return chain.first { f.isVideoStabilizationModeSupported($0) } ?? .off
+    }
+
     func setStabilization(_ m: StabilizationOption) {
         camera.stabilization = m
-        let mode = m.mode
-        Task { try? await mixer.configuration(video: 0) { unit in unit.preferredVideoStabilizationMode = mode } }
+        applyStabilizationSafely(silent: false)
+    }
+
+    private func applyStabilizationSafely(silent: Bool) {
+        let m = camera.stabilization
+        let mode = StreamModel.safeStabMode(currentDevice, m.mode)
+        if mode != m.mode && !silent {
+            toastText = mode == .off ? "当前镜头/分辨率不支持防抖" : "当前格式不支持该防抖模式，已改用标准防抖"
+        }
+        Task {
+            try? await mixer.configuration(video: 0) { unit in
+                unit.preferredVideoStabilizationMode = mode
+            }
+        }
     }
 
     // MARK: - 自动重连
