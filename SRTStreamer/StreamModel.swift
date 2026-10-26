@@ -321,13 +321,27 @@ final class StreamModel: ObservableObject {
         camera.device = dev
         camera.position = pos
         if let dev {
-            // displayVideoZoomFactorMultiplier：虚拟设备上 1x 显示对应的 videoZoomFactor
-            let mult = max(dev.displayVideoZoomFactorMultiplier, 1)
-            let ultra = !dev.constituentDevices.isEmpty &&
-                (dev.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera } ||
-                 (dev.deviceType == .builtInDualWideCamera || dev.deviceType == .builtInTripleCamera ||
-                  (dev.minAvailableVideoZoomFactor < mult * 0.6)))
-            hasUltraWide = ultra && pos == .back
+            // 虚拟设备：1x 对应的 videoZoomFactor（iOS 18+ 用 displayVideoZoomFactorMultiplier，
+            // 否则用 virtualDeviceSwitchOverVideoZoomFactors 首项，再否则双/三摄默认 2）
+            let mult: CGFloat = {
+                if #available(iOS 18.0, *) {
+                    return max(dev.displayVideoZoomFactorMultiplier, 1)
+                }
+                if let first = dev.virtualDeviceSwitchOverVideoZoomFactors.first {
+                    return CGFloat(truncating: first)
+                }
+                switch dev.deviceType {
+                case .builtInDualWideCamera, .builtInTripleCamera: return 2
+                default: return 1
+                }
+            }()
+            let ultra = pos == .back && (
+                dev.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera } ||
+                dev.deviceType == .builtInDualWideCamera ||
+                dev.deviceType == .builtInTripleCamera ||
+                (mult > 1 && dev.minAvailableVideoZoomFactor < mult * 0.6)
+            )
+            hasUltraWide = ultra
             zoomScale = hasUltraWide ? mult : 1
         } else {
             hasUltraWide = false
