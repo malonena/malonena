@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var sliderZoom: Double = 1
     @State private var showCamPanel = false
     @State private var focusPoint: CGPoint?
+    @State private var toast: String?
     @Environment(\.scenePhase) private var scenePhase
 
     private var hasError: Bool {
@@ -30,7 +31,7 @@ struct ContentView: View {
         if model.isStreaming { t += String(format: " · 发送 %.2fMbps", model.sendMbps) }
         return t
     }
-    private var zoomPresets: [Double] { model.hasUltraWide ? [0.5, 1.0, 2.0] : [1.0, 2.0] }
+    private var zoomPresets: [Double] { [0.5, 1.0, 2.0] }
 
     var body: some View {
         ZStack {
@@ -65,6 +66,15 @@ struct ContentView: View {
             if model.isLocked {
                 LockOverlay(model: model, isLocked: $model.isLocked)
                     .zIndex(10)
+            }
+            if let toast {
+                Text(toast)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Capsule().fill(Color.black.opacity(0.75)))
+                    .transition(.opacity)
+                    .zIndex(20)
             }
         }
         .preferredColorScheme(.dark)
@@ -143,13 +153,19 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Spacer()
                 ForEach(zoomPresets, id: \.self) { z in
-                    Button(action: { model.setZoom(CGFloat(z)) }) {
+                    let unsupported = z < 1 && !model.hasUltraWide
+                    Button(action: {
+                        if !model.setZoom(CGFloat(z)) {
+                            showToast(model.positionIsFront ? "前置镜头不支持 0.5x" : "当前镜头不支持 0.5x")
+                        }
+                    }) {
                         Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
                             .font(.footnote.weight(.bold))
-                            .foregroundColor(abs(Double(model.zoom) - z) < 0.01 ? .yellow : .white)
+                            .foregroundColor(unsupported ? .white.opacity(0.35) :
+                                (abs(Double(model.zoom) - z) < 0.01 ? .yellow : .white))
                             .rotationEffect(.degrees(model.uiAngle))
                             .frame(width: 44, height: 30)
-                            .background(Capsule().fill(Color.black.opacity(0.55)))
+                            .background(Capsule().fill(Color.black.opacity(unsupported ? 0.3 : 0.55)))
                     }
                 }
                 Spacer()
@@ -169,6 +185,13 @@ struct ContentView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.45)))
+        }
+    }
+
+    private func showToast(_ msg: String) {
+        toast = msg
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            if toast == msg { toast = nil }
         }
     }
 
@@ -227,6 +250,8 @@ struct ContentView: View {
             }
             .disabled(model.isBusy)
             Spacer()
+            RoundIconButton(icon: model.micEnabled ? "mic.fill" : "mic.slash.fill",
+                            tint: model.micEnabled ? .white : .red) { model.toggleMic() }
             RoundIconButton(icon: "arrow.triangle.2.circlepath.camera") { model.flipCamera() }
         }
         .padding(.horizontal, 12)
@@ -255,13 +280,14 @@ struct CapsuleButton: View {
 struct RoundIconButton: View {
     @Environment(\.uiAngle) private var angle
     let icon: String
+    var tint: Color = .white
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .rotationEffect(.degrees(angle))
                 .font(.system(size: 20, weight: .semibold))
-                .foregroundColor(.white)
+                .foregroundColor(tint)
                 .frame(width: 50, height: 50)
                 .background(Circle().fill(Color.black.opacity(0.55)))
         }
@@ -274,7 +300,7 @@ struct SettingsSheet: View {
     @State private var kbps: Double = 6000
     @State private var sliderZoom: Double = 1
 
-    private var zoomPresets: [Double] { model.hasUltraWide ? [0.5, 1.0, 2.0] : [1.0, 2.0] }
+    private var zoomPresets: [Double] { [0.5, 1.0, 2.0] }
 
     var body: some View {
         NavigationView {
@@ -322,15 +348,16 @@ struct SettingsSheet: View {
                         .toggleStyle(SwitchToggleStyle(tint: .green))
                     HStack(spacing: 10) {
                         ForEach(zoomPresets, id: \.self) { z in
-                            let sel = abs(Double(model.zoom) - z) < 0.01
-                            Button(action: { model.setZoom(CGFloat(z)); sliderZoom = z }) {
+                            let unsupported = z < 1 && !model.hasUltraWide
+                            Button(action: { _ = model.setZoom(CGFloat(z)) }) {
                                 Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
                                     .font(.footnote.weight(.bold))
-                                    .foregroundColor(sel ? .black : .white)
-                                    .frame(width: 50, height: 30)
-                                    .background(Capsule().fill(sel ? Color.yellow : Color.white.opacity(0.15)))
+                                    .foregroundColor(unsupported ? .gray :
+                                        (abs(Double(model.zoom) - z) < 0.01 ? .yellow : .primary))
+                                    .frame(width: 44, height: 30)
+                                    .background(Capsule().fill(Color.secondary.opacity(unsupported ? 0.15 : 0.2)))
                             }
-                            .buttonStyle(.plain)
+                            .disabled(unsupported)
                         }
                     }
                     VStack(alignment: .leading, spacing: 6) {
@@ -348,7 +375,8 @@ struct SettingsSheet: View {
                         ForEach(RotationMode.allCases) { Text($0.rawValue).tag($0) }
                     }
                 }
-                Section(header: Text("推流"), footer: Text("自动开始推流仅在地址有效且不含「密钥」占位时生效。解锁不会停止推流。")) {
+                Section(header: Text("推流"), footer: Text("自动开始推流仅在地址有效且不含「密钥」占位时生效。解锁不会停止推流。静音时仍发送静音音频包，断流检测不受影响。")) {
+                    Toggle("声音采集", isOn: $model.micEnabled)
                     Toggle("断流自动重连", isOn: $model.autoReconnect)
                     Toggle("启动 App 后自动开始推流", isOn: $model.autoStartOnLaunch)
                     Toggle("自动推流后自动锁屏", isOn: $model.autoLockAfterStart)

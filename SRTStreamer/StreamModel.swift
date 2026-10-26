@@ -128,6 +128,13 @@ final class StreamModel: ObservableObject {
     @Published var isLocked = false
     @Published var audioLevel: Float = 0
     private var meterTimer: Timer?
+    /// 声音采集（false = 静音，推流不断）
+    @Published var micEnabled: Bool = (UserDefaults.standard.object(forKey: "micEnabled") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(micEnabled, forKey: "micEnabled")
+            Task { await applyMicMute() }
+        }
+    }
     @Published var reconnectAttempt = 0
     @Published var isReconnecting = false
     private var wantStreaming = false
@@ -190,6 +197,7 @@ final class StreamModel: ObservableObject {
         if audioOK {
             do { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
             catch { status = "麦克风连接失败: \(error.localizedDescription)" }
+            await applyMicMute()
         }
         await mixer.addOutput(previewView) // 预览始终直接来自 mixer
         await mixer.startRunning()
@@ -312,9 +320,15 @@ final class StreamModel: ObservableObject {
         currentDevice = dev
         camera.device = dev
         camera.position = pos
-        if let dev, dev.constituentDevices.contains(where: { $0.deviceType == .builtInUltraWideCamera }) {
-            hasUltraWide = true
-            zoomScale = 2 // 虚拟设备 1.0 = 超广角，2.0 = 广角(1x)
+        if let dev {
+            // displayVideoZoomFactorMultiplier：虚拟设备上 1x 显示对应的 videoZoomFactor
+            let mult = max(dev.displayVideoZoomFactorMultiplier, 1)
+            let ultra = !dev.constituentDevices.isEmpty &&
+                (dev.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera } ||
+                 (dev.deviceType == .builtInDualWideCamera || dev.deviceType == .builtInTripleCamera ||
+                  (dev.minAvailableVideoZoomFactor < mult * 0.6)))
+            hasUltraWide = ultra && pos == .back
+            zoomScale = hasUltraWide ? mult : 1
         } else {
             hasUltraWide = false
             zoomScale = 1
@@ -346,14 +360,20 @@ final class StreamModel: ObservableObject {
     }
 
     var minZoom: CGFloat { hasUltraWide ? 0.5 : 1 }
+    var positionIsFront: Bool { position == .front }
 
-    func setZoom(_ z: CGFloat) {
+    /// 尝试设置变焦。不支持的 0.5x 返回 false（调用方弹 toast）
+    @discardableResult
+    func setZoom(_ z: CGFloat) -> Bool {
+        if z < 1 && !hasUltraWide { return false }
         zoom = min(max(z, minZoom), 10)
         applyZoomFactor()
+        return true
     }
 
     private func applyZoomFactor() {
         guard let d = currentDevice else { return }
+        // 用户 1x → videoZoomFactor = displayVideoZoomFactorMultiplier（虚拟设备）
         let factor = zoom * zoomScale
         let f = min(max(factor, d.minAvailableVideoZoomFactor), min(d.activeFormat.videoMaxZoomFactor, 20))
         do {
@@ -361,6 +381,14 @@ final class StreamModel: ObservableObject {
             d.videoZoomFactor = f
             d.unlockForConfiguration()
         } catch {}
+    }
+
+    func toggleMic() { micEnabled.toggle() }
+
+    private func applyMicMute() async {
+        var settings = await mixer.audioMixerSettings
+        settings.isMuted = !micEnabled
+        await mixer.setAudioMixerSettings(settings)
     }
 
     /// 设备是否支持当前分辨率下的 60fps
@@ -582,6 +610,10 @@ final class StreamModel: ObservableObject {
         meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                if !self.micEnabled {
+                    self.audioLevel = 0
+                    return
+                }
                 let p = self.counter.audioLevel
                 // 转为 dB 刻度 (-50..0 dB → 0..1)
                 let db = 20 * log10(max(p, 0.00001))
