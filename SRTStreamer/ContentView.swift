@@ -149,6 +149,12 @@ struct ContentView: View {
 
     private var zoomControls: some View {
         VStack(spacing: 10) {
+            HStack {
+                Spacer()
+                IconCircleButton(icon: "lock.fill", bg: Color.red.opacity(0.35)) {
+                    model.oneTapLockStream()
+                }
+            }
             HStack(spacing: 10) {
                 Text(zoomLabel(model.zoom))
                     .font(.footnote.monospacedDigit().weight(.semibold))
@@ -160,9 +166,6 @@ struct ContentView: View {
                 .accentColor(.yellow)
                 .onChange(of: sliderZoom) { v in
                     model.setZoom(CGFloat(v))
-                }
-                IconCircleButton(icon: "lock.fill", bg: Color.red.opacity(0.6)) {
-                    model.oneTapLockStream()
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
