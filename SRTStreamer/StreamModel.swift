@@ -126,6 +126,8 @@ final class StreamModel: ObservableObject {
         didSet { UserDefaults.standard.set(autoLockAfterStart, forKey: "autoLockAfterStart") }
     }
     @Published var isLocked = false
+    @Published var audioLevel: Float = 0
+    private var meterTimer: Timer?
     @Published var reconnectAttempt = 0
     @Published var isReconnecting = false
     private var wantStreaming = false
@@ -560,6 +562,9 @@ final class StreamModel: ObservableObject {
     private func teardown() async {
         statsTimer?.invalidate()
         statsTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        audioLevel = 0
         if let stream {
             await stream.close()
             await mixer.removeOutput(stream)
@@ -573,6 +578,16 @@ final class StreamModel: ObservableObject {
     }
 
     private func startStats() {
+        meterTimer?.invalidate()
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let p = self.counter.audioLevel
+                // 转为 dB 刻度 (-50..0 dB → 0..1)
+                let db = 20 * log10(max(p, 0.00001))
+                self.audioLevel = max(0, min(1, (db + 50) / 50))
+            }
+        }
         lastSentKB = 0
         stallSeconds = 0
         statsTimer?.invalidate()

@@ -25,6 +25,7 @@ struct LockOverlay: View {
                 HStack(spacing: 5) {
                     StatusDot(color: model.isStreaming ? .red : Color.gray, pulsing: model.isStreaming, size: 6)
                     Text(statusLine).font(.caption2.monospacedDigit()).lineLimit(2)
+                    if model.isStreaming { AudioMeter(level: model.audioLevel, dim: true) }
                 }
                 if model.isReconnecting {
                     Text("重连中…第\(model.reconnectAttempt)次").font(.caption2)

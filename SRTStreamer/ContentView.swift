@@ -88,6 +88,7 @@ struct ContentView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(hasError ? .red : .white)
                     .lineLimit(2)
+                if model.isStreaming { AudioMeter(level: model.audioLevel) }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Capsule().fill(Color.black.opacity(0.55)))
@@ -418,5 +419,26 @@ struct StatusDot: View {
         dim = false
         guard pulsing else { return }
         withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { dim = true }
+    }
+}
+
+struct AudioMeter: View {
+    let level: Float
+    var bars = 10
+    var dim = false
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<bars, id: \.self) { i in
+                let on = Float(i) < level * Float(bars)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(color(i).opacity(on ? (dim ? 0.6 : 1) : 0.18))
+                    .frame(width: 3, height: 5 + CGFloat(i) * 0.8)
+            }
+        }
+        .animation(.linear(duration: 0.06), value: level)
+    }
+    private func color(_ i: Int) -> Color {
+        let f = Double(i) / Double(bars - 1)
+        return f < 0.6 ? .green : (f < 0.85 ? .yellow : .red)
     }
 }
