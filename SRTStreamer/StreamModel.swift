@@ -9,10 +9,51 @@ import VideoToolbox
 enum ResolutionOption: String, CaseIterable, Identifiable {
     case p720 = "720p"
     case p1080 = "1080p"
+    case k2 = "2K"
     var id: String { rawValue }
     /// 竖屏尺寸
-    var size: CGSize { self == .p720 ? CGSize(width: 720, height: 1280) : CGSize(width: 1080, height: 1920) }
-    var preset: AVCaptureSession.Preset { self == .p720 ? .hd1280x720 : .hd1920x1080 }
+    var size: CGSize {
+        switch self {
+        case .p720: return CGSize(width: 720, height: 1280)
+        case .p1080: return CGSize(width: 1080, height: 1920)
+        case .k2: return CGSize(width: 1440, height: 2560)
+        }
+    }
+    var label: String {
+        switch self {
+        case .p720: return "720p (1280×720)"
+        case .p1080: return "1080p (1920×1080)"
+        case .k2: return "2K (2560×1440)"
+        }
+    }
+    var preset: AVCaptureSession.Preset {
+        switch self {
+        case .p720: return .hd1280x720
+        case .p1080: return .hd1920x1080
+        case .k2: return .hd4K3840x2160 // 4K 采集再缩放到 2560×1440
+        }
+    }
+    var captureDims: (Int32, Int32) {
+        switch self {
+        case .p720: return (1280, 720)
+        case .p1080: return (1920, 1080)
+        case .k2: return (3840, 2160)
+        }
+    }
+    var defaultKbps: Int {
+        switch self {
+        case .p720: return 4000
+        case .p1080: return 6000
+        case .k2: return 10000
+        }
+    }
+}
+
+enum AspectOption: String, CaseIterable, Identifiable {
+    case auto = "自动"
+    case landscape = "16:9"
+    case portrait = "9:16"
+    var id: String { rawValue }
 }
 
 enum ProfileOption: String, CaseIterable, Identifiable {
@@ -33,20 +74,30 @@ final class StreamModel: ObservableObject {
     @Published var resolution: ResolutionOption = ResolutionOption(rawValue: UserDefaults.standard.string(forKey: "resolution") ?? "") ?? .p720 {
         didSet { UserDefaults.standard.set(resolution.rawValue, forKey: "resolution") }
     }
-    @Published var bitrateMbps: Int = (UserDefaults.standard.object(forKey: "bitrateMbps") as? Int) ?? 4 {
-        didSet { UserDefaults.standard.set(bitrateMbps, forKey: "bitrateMbps") }
+    @Published var bitrateKbps: Int = (UserDefaults.standard.object(forKey: "bitrateKbps") as? Int) ?? 6000 {
+        didSet { UserDefaults.standard.set(bitrateKbps, forKey: "bitrateKbps") }
     }
+    @Published var aspect: AspectOption = AspectOption(rawValue: UserDefaults.standard.string(forKey: "aspect") ?? "") ?? .auto {
+        didSet { UserDefaults.standard.set(aspect.rawValue, forKey: "aspect"); applyOrientation() }
+    }
+    @Published var multiCam: Bool = (UserDefaults.standard.object(forKey: "multiCam") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(multiCam, forKey: "multiCam"); zoom = 1; Task { await attachCamera() } }
+    }
+    /// 实际生效帧率（设备不支持 60fps 时保持 30）
+    @Published var effectiveFps: Int = 30
+    @Published var deviceLandscape = false
+    private var orientationObserver: NSObjectProtocol?
     @Published var profile: ProfileOption = ProfileOption(rawValue: UserDefaults.standard.string(forKey: "profile") ?? "") ?? .baseline {
         didSet { UserDefaults.standard.set(profile.rawValue, forKey: "profile") }
     }
-    @Published var fps: Int = (UserDefaults.standard.object(forKey: "fps") as? Int) ?? 30 {
+    @Published var fps: Int = ((UserDefaults.standard.object(forKey: "fps") as? Int) == 60) ? 60 : 30 {
         didSet { UserDefaults.standard.set(fps, forKey: "fps") }
     }
     /// 用户视角的变焦倍数（0.5 = 超广角）
     @Published var zoom: CGFloat = 1
     @Published var hasUltraWide = false
     private var currentDevice: AVCaptureDevice?
-    private var usingUltraWide = false
+    private var zoomScale: CGFloat = 1 // 用户倍数 → videoZoomFactor 的系数
 
     @Published var isStreaming = false
     @Published var isBusy = false
@@ -76,8 +127,15 @@ final class StreamModel: ObservableObject {
         if !audioOK { status = "没有麦克风权限（仅视频）" }
 
         await mixer.setSessionPreset(resolution.preset)
-        await mixer.setVideoOrientation(.portrait)
-        await mixer.setFrameRate(Float64(fps))
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        updateDeviceOrientation()
+        orientationObserver = NotificationCenter.default.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateDeviceOrientation()
+                self?.applyOrientation()
+            }
+        }
+        await mixer.setVideoOrientation(captureOrientation)
         await attachCamera()
         if audioOK {
             do { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
@@ -87,14 +145,61 @@ final class StreamModel: ObservableObject {
         await mixer.startRunning()
     }
 
+    // MARK: - 方向
+
+    private func updateDeviceOrientation() {
+        let o = UIDevice.current.orientation
+        if o.isLandscape { deviceLandscape = true } else if o == .portrait || o == .portraitUpsideDown { deviceLandscape = false }
+    }
+
+    var isLandscapeOutput: Bool {
+        switch aspect {
+        case .auto: return deviceLandscape
+        case .landscape: return true
+        case .portrait: return false
+        }
+    }
+
+    var captureOrientation: AVCaptureVideoOrientation {
+        guard isLandscapeOutput else { return .portrait }
+        if aspect == .auto && UIDevice.current.orientation == .landscapeRight { return .landscapeLeft }
+        return .landscapeRight
+    }
+
+    var outputSize: CGSize {
+        let s = resolution.size
+        return isLandscapeOutput ? CGSize(width: s.height, height: s.width) : s
+    }
+
+    func applyOrientation() {
+        guard started, !isStreaming else { return }
+        let o = captureOrientation
+        Task { await mixer.setVideoOrientation(o) }
+    }
+
+    // MARK: - 摄像头
+
+    private func pickDevice(_ pos: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        if multiCam && pos == .back {
+            if let d = AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back) { return d }
+            if let d = AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back) { return d }
+            if let d = AVCaptureDevice.default(.builtInDualCamera, for: .video, position: .back) { return d }
+        }
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: pos)
+    }
+
     private func attachCamera() async {
         let pos = position
-        hasUltraWide = (pos == .back) && AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) != nil
-        let wantUW = hasUltraWide && zoom < 1
-        let dev = wantUW ? AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: pos)
-                         : AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: pos)
-        usingUltraWide = wantUW
+        let dev = pickDevice(pos)
         currentDevice = dev
+        if let dev, dev.constituentDevices.contains(where: { $0.deviceType == .builtInUltraWideCamera }) {
+            hasUltraWide = true
+            zoomScale = 2 // 虚拟设备 1.0 = 超广角，2.0 = 广角(1x)
+        } else {
+            hasUltraWide = false
+            zoomScale = 1
+        }
+        if !hasUltraWide && zoom < 1 { zoom = 1 }
         guard let device = dev else {
             cameraError = "找不到摄像头设备"
             return
@@ -105,6 +210,7 @@ final class StreamModel: ObservableObject {
             }
             cameraError = nil
             applyZoomFactor()
+            await applyFrameRateNow()
         } catch {
             cameraError = "摄像头连接失败: \(error.localizedDescription)"
         }
@@ -116,23 +222,17 @@ final class StreamModel: ObservableObject {
         Task { await attachCamera() }
     }
 
+    var minZoom: CGFloat { hasUltraWide ? 0.5 : 1 }
+
     func setZoom(_ z: CGFloat) {
-        let minZ: CGFloat = hasUltraWide ? 0.5 : 1
-        let nz = min(max(z, minZ), 10)
-        let needUW = hasUltraWide && nz < 1
-        zoom = nz
-        if needUW != usingUltraWide {
-            Task { await attachCamera() }
-        } else {
-            applyZoomFactor()
-        }
+        zoom = min(max(z, minZoom), 10)
+        applyZoomFactor()
     }
 
     private func applyZoomFactor() {
         guard let d = currentDevice else { return }
-        // 超广角: 0.5x→1.0 ; 广角: 1x→1.0
-        let factor = usingUltraWide ? zoom * 2 : zoom
-        let f = min(max(factor, d.minAvailableVideoZoomFactor), min(d.activeFormat.videoMaxZoomFactor, 10))
+        let factor = zoom * zoomScale
+        let f = min(max(factor, d.minAvailableVideoZoomFactor), min(d.activeFormat.videoMaxZoomFactor, 20))
         do {
             try d.lockForConfiguration()
             d.videoZoomFactor = f
@@ -140,14 +240,36 @@ final class StreamModel: ObservableObject {
         } catch {}
     }
 
+    /// 设备是否支持当前分辨率下的 60fps
+    private func supports60() -> Bool {
+        guard let d = currentDevice else { return false }
+        let (w, h) = resolution.captureDims
+        return d.formats.contains { f in
+            let dim = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
+            return dim.width == w && dim.height == h && f.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 60 }
+        }
+    }
+
+    private func applyFrameRateNow() async {
+        let target = (fps == 60 && supports60()) ? 60 : 30
+        effectiveFps = target
+        await mixer.setFrameRate(Float64(target))
+    }
+
     func applyFrameRate() {
         guard !isStreaming else { return }
-        Task { await mixer.setFrameRate(Float64(fps)) }
+        Task { await applyFrameRateNow() }
     }
+
+    func resetBitrate() { bitrateKbps = resolution.defaultKbps }
 
     func applyResolution() {
         guard !isStreaming else { return }
-        Task { await mixer.setSessionPreset(resolution.preset) }
+        bitrateKbps = resolution.defaultKbps
+        Task {
+            await mixer.setSessionPreset(resolution.preset)
+            await applyFrameRateNow()
+        }
     }
 
     // MARK: - URL 处理
@@ -193,10 +315,11 @@ final class StreamModel: ObservableObject {
         self.stream = stream
         counter.reset()
 
+        await mixer.setVideoOrientation(captureOrientation)
         // 1. 编码参数必须在 publish 前设置
         var v = VideoCodecSettings(
-            videoSize: resolution.size,
-            bitRate: bitrateMbps * 1_000_000,
+            videoSize: outputSize,
+            bitRate: bitrateKbps * 1000,
             profileLevel: profile.profileLevel,
             scalingMode: .trim,
             bitRateMode: .average,

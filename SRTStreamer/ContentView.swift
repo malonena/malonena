@@ -2,7 +2,6 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = StreamModel()
-    @AppStorage("autoOrientation") private var autoOrientation = true
     @State private var showSettings = false
     @State private var sliderZoom: Double = 1
 
@@ -21,8 +20,10 @@ struct ContentView: View {
         return model.status
     }
     private var caption: String {
-        let s = model.resolution.size
-        var t = "\(autoOrientation ? "自动" : "竖屏") 9:16 · \(model.resolution.rawValue) \(Int(s.width))×\(Int(s.height)) · \(model.fps)fps · \(model.bitrateMbps).0Mbps"
+        let s = model.outputSize
+        let ar = model.isLandscapeOutput ? "16:9" : "9:16"
+        let head = model.aspect == .auto ? "自动 \(ar)" : ar
+        var t = "\(head) · \(model.resolution.rawValue) \(Int(s.width))×\(Int(s.height)) · \(model.effectiveFps)fps · " + String(format: "%.1fMbps", Double(model.bitrateKbps) / 1000)
         if model.isStreaming { t += String(format: " · 发送 %.2fMbps", model.sendMbps) }
         return t
     }
@@ -71,11 +72,14 @@ struct ContentView: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.5)))
 
             HStack(spacing: 8) {
-                CapsuleButton(icon: "rotate.right", title: autoOrientation ? "自动" : "竖屏") {
-                    autoOrientation.toggle()
+                CapsuleButton(icon: "rotate.right", title: model.aspect.rawValue) {
+                    let all = AspectOption.allCases
+                    model.aspect = all[((all.firstIndex(of: model.aspect) ?? 0) + 1) % all.count]
                 }
+                .disabled(model.isStreaming)
                 CapsuleButton(icon: "rectangle.on.rectangle", title: model.resolution.rawValue) {
-                    model.resolution = (model.resolution == .p720) ? .p1080 : .p720
+                    let all = ResolutionOption.allCases
+                    model.resolution = all[((all.firstIndex(of: model.resolution) ?? 0) + 1) % all.count]
                     model.applyResolution()
                 }
                 .disabled(model.isStreaming)
@@ -104,13 +108,12 @@ struct ContentView: View {
                     .font(.footnote.monospacedDigit().weight(.semibold))
                     .foregroundColor(.yellow)
                     .frame(width: 40)
-                Slider(value: $sliderZoom, in: (model.hasUltraWide ? 0.5 : 1.0)...10.0, onEditingChanged: { editing in
+                Slider(value: $sliderZoom, in: Double(model.minZoom)...10.0, onEditingChanged: { editing in
                     if !editing { model.setZoom(CGFloat(sliderZoom)) }
                 })
                 .accentColor(.yellow)
                 .onChange(of: sliderZoom) { v in
-                    // 同一镜头内实时变焦；跨越 1x 切换镜头在松手时进行
-                    if (v < 1) == (model.zoom < 1) { model.setZoom(CGFloat(v)) }
+                    model.setZoom(CGFloat(v))
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
@@ -214,45 +217,113 @@ struct RoundIconButton: View {
 struct SettingsSheet: View {
     @ObservedObject var model: StreamModel
     @Environment(\.presentationMode) private var presentationMode
+    @State private var kbps: Double = 6000
+    @State private var sliderZoom: Double = 1
+
+    private var zoomPresets: [Double] { model.hasUltraWide ? [0.5, 1.0, 2.0] : [1.0, 2.0] }
 
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("码率")) {
-                    Picker("码率", selection: $model.bitrateMbps) {
-                        ForEach(2...6, id: \.self) { Text("\($0)M").tag($0) }
+                Section(header: Text("视频"),
+                        footer: Text("2K 用 4K 采集再缩放到 2560×1440。60fps 需要设备支持对应分辨率；不支持时会自动保持 30fps。")) {
+                    Picker("画面比例", selection: $model.aspect) {
+                        ForEach(AspectOption.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    Picker("分辨率", selection: $model.resolution) {
+                        ForEach(ResolutionOption.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: model.resolution) { _ in
+                        model.applyResolution()
+                        kbps = Double(model.bitrateKbps)
+                    }
+                    Picker("帧率", selection: $model.fps) {
+                        Text("30 fps").tag(30)
+                        Text("60 fps").tag(60)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: model.fps) { _ in model.applyFrameRate() }
                 }
-                Section(header: Text("H.264 Profile")) {
+
+                Section(header: Text("码率"), footer: Text("码率跟随分辨率：720p 4M / 1080p 6M / 2K 10M。")) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("视频码率：\(Self.fmt(Int(kbps))) kbps (" + String(format: "%.1f", kbps / 1000) + " Mbps)")
+                        Slider(value: $kbps, in: 1000...12000, step: 100, onEditingChanged: { editing in
+                            if !editing { model.bitrateKbps = Int(kbps) }
+                        })
+                        .accentColor(.red)
+                        .onChange(of: kbps) { v in model.bitrateKbps = Int(v) }
+                    }
+                    Button("恢复默认（\(model.resolution.rawValue) \(model.resolution.defaultKbps / 1000)M）") {
+                        model.resetBitrate()
+                        kbps = Double(model.bitrateKbps)
+                    }
+                }
+
+                Section(header: Text("镜头 / 变焦"),
+                        footer: Text("多镜头模式下变焦会自动切换超广角 / 广角 / 长焦。部分机型在多镜头模式下不支持手动对焦，需要时可关闭多镜头。")) {
+                    Toggle("多镜头自动切换（支持 0.5x 超广角）", isOn: $model.multiCam)
+                        .toggleStyle(SwitchToggleStyle(tint: .green))
+                    HStack(spacing: 10) {
+                        ForEach(zoomPresets, id: \.self) { z in
+                            let sel = abs(Double(model.zoom) - z) < 0.01
+                            Button(action: { model.setZoom(CGFloat(z)); sliderZoom = z }) {
+                                Text(z == 0.5 ? "0.5x" : "\(Int(z))x")
+                                    .font(.footnote.weight(.bold))
+                                    .foregroundColor(sel ? .black : .white)
+                                    .frame(width: 50, height: 30)
+                                    .background(Capsule().fill(sel ? Color.yellow : Color.white.opacity(0.15)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("变焦：" + Self.zoomText(model.zoom))
+                        Slider(value: $sliderZoom, in: Double(model.minZoom)...10.0)
+                            .onChange(of: sliderZoom) { v in model.setZoom(CGFloat(v)) }
+                    }
+                }
+
+                Section(header: Text("H.264")) {
                     Picker("Profile", selection: $model.profile) {
                         ForEach(ProfileOption.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
                 }
-                Section(header: Text("帧率")) {
-                    Picker("帧率", selection: $model.fps) {
-                        ForEach([24, 25, 30], id: \.self) { Text("\($0) fps").tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: model.fps) { _ in model.applyFrameRate() }
-                }
-                Section(header: Text("分辨率")) {
-                    Picker("分辨率", selection: $model.resolution) {
-                        ForEach(ResolutionOption.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: model.resolution) { _ in model.applyResolution() }
-                }
             }
+            .disabled(model.isStreaming)
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { presentationMode.wrappedValue.dismiss() }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { presentationMode.wrappedValue.dismiss() }) {
+                        Text("完成")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Capsule().fill(Color.white.opacity(0.18)))
+                    }
                 }
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            kbps = Double(model.bitrateKbps)
+            sliderZoom = Double(model.zoom)
+        }
+    }
+
+    static func fmt(_ n: Int) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.locale = Locale(identifier: "en_US")
+        return f.string(from: NSNumber(value: n)) ?? "\(n)"
+    }
+
+    static func zoomText(_ z: CGFloat) -> String {
+        if abs(z - z.rounded()) < 0.05 && z >= 1 { return "\(Int(z.rounded()))x" }
+        return String(format: "%.1fx", Double(z))
     }
 }
