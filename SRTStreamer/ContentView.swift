@@ -111,8 +111,8 @@ struct ContentView: View {
                 }
                 .disabled(model.isStreaming)
                 .opacity(model.isStreaming ? 0.5 : 1)
-                CapsuleButton(icon: "lock.fill", title: "锁屏") {
-                    model.isLocked = true
+                CapsuleButton(icon: "lock.fill", title: "一键锁屏推流") {
+                    model.oneTapLockStream()
                 }
                 CapsuleButton(icon: "slider.horizontal.3", title: "参数") {
                     showCamPanel.toggle()
@@ -347,8 +347,10 @@ struct SettingsSheet: View {
                         ForEach(RotationMode.allCases) { Text($0.rawValue).tag($0) }
                     }
                 }
-                Section(header: Text("推流")) {
+                Section(header: Text("推流"), footer: Text("自动开始推流仅在地址有效且不含「密钥」占位时生效。解锁不会停止推流。")) {
                     Toggle("断流自动重连", isOn: $model.autoReconnect)
+                    Toggle("启动 App 后自动开始推流", isOn: $model.autoStartOnLaunch)
+                    Toggle("自动推流后自动锁屏", isOn: $model.autoLockAfterStart)
                 }
                 Section(header: Text("H.264")) {
                     Picker("Profile", selection: $model.profile) {

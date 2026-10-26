@@ -119,6 +119,12 @@ final class StreamModel: ObservableObject {
     @Published var autoReconnect: Bool = (UserDefaults.standard.object(forKey: "autoReconnect") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(autoReconnect, forKey: "autoReconnect") }
     }
+    @Published var autoStartOnLaunch: Bool = (UserDefaults.standard.object(forKey: "autoStartOnLaunch") as? Bool) ?? false {
+        didSet { UserDefaults.standard.set(autoStartOnLaunch, forKey: "autoStartOnLaunch") }
+    }
+    @Published var autoLockAfterStart: Bool = (UserDefaults.standard.object(forKey: "autoLockAfterStart") as? Bool) ?? false {
+        didSet { UserDefaults.standard.set(autoLockAfterStart, forKey: "autoLockAfterStart") }
+    }
     @Published var isLocked = false
     @Published var reconnectAttempt = 0
     @Published var isReconnecting = false
@@ -185,6 +191,48 @@ final class StreamModel: ObservableObject {
         }
         await mixer.addOutput(previewView) // 预览始终直接来自 mixer
         await mixer.startRunning()
+        if autoStartOnLaunch {
+            await maybeAutoStart(thenLock: autoLockAfterStart)
+        }
+    }
+
+    /// URL 可用（非空、可解析、不含占位「密钥」）
+    var canAutoStart: Bool {
+        guard let u = normalizedURL() else { return false }
+        if urlText.contains("密钥") { return false }
+        _ = u
+        return true
+    }
+
+    private func maybeAutoStart(thenLock: Bool) async {
+        guard canAutoStart, !isStreaming, !isBusy else { return }
+        wantStreaming = true
+        await start()
+        if isStreaming || isReconnecting {
+            if thenLock { isLocked = true }
+        } else if thenLock {
+            // 启动失败不锁屏
+        }
+    }
+
+    /// 一键锁屏推流：立即锁屏并开始推流；失败则解锁并保留错误状态
+    func oneTapLockStream() {
+        Task { @MainActor in
+            isLocked = true
+            if isStreaming || isReconnecting { return }
+            if !canAutoStart {
+                if urlText.contains("密钥") { status = "请把地址里的“密钥”替换成你的推流密钥" }
+                else { status = "SRT 地址格式错误" }
+                isLocked = false
+                return
+            }
+            wantStreaming = true
+            await start()
+            if !isStreaming {
+                isLocked = false
+                // status 已由 start() 写入
+            }
+        }
     }
 
     // MARK: - 方向
